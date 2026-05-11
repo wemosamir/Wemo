@@ -428,9 +428,13 @@ function AuthScreen({ onLogin }) {
   const handleLogin = async () => {
     setError("");
     if (!email.trim() || !password) { setError("Please enter email and password."); return; }
+    if (!window.fbAuth) { setError("Firebase not loaded — check internet & refresh."); return; }
     setBusy(true);
     try {
-      const user = await fbLogin(email, password);
+      // Add a 15-second timeout so the user never sees an endless spinner
+      const loginPromise = fbLogin(email, password);
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject({ code: "auth/network-request-failed" }), 15000));
+      const user = await Promise.race([loginPromise, timeoutPromise]);
       onLogin(user);
     } catch (err) {
       const code = err.code || "";
@@ -455,9 +459,12 @@ function AuthScreen({ onLogin }) {
     if (!email.trim() || !password || !shopName.trim()) { setError("Please fill in all fields."); return; }
     if (password.length < 6) { setError("Password must be at least 6 characters."); return; }
     if (password !== confirmPassword) { setError("Passwords don't match."); return; }
+    if (!window.fbAuth) { setError("Firebase not loaded — check internet & refresh."); return; }
     setBusy(true);
     try {
-      const newUser = await fbSignup(email, password, shopName);
+      const signupPromise = fbSignup(email, password, shopName);
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject({ code: "auth/network-request-failed" }), 15000));
+      const newUser = await Promise.race([signupPromise, timeoutPromise]);
       onLogin(newUser);
     } catch (err) {
       const code = err.code || "";
@@ -534,7 +541,7 @@ function AuthScreen({ onLogin }) {
           <div style={{ height: 12 }} />
           <Field label="Password"><TInput type="password" value={password} onChange={setPassword} placeholder="Your password" /></Field>
           {error && <div style={{ marginTop: 14, padding: "10px 12px", background: "#fee2e2", border: "1px solid #fca5a5", borderRadius: 8, fontSize: 13, color: "#b91c1c", fontFamily: "sans-serif" }}>⚠️ {error}</div>}
-          <button onClick={handleLogin} style={{ width: "100%", background: "#dc2626", color: "#fff", border: "none", borderRadius: 10, padding: "13px", fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: "Georgia, serif", marginTop: 20 }}>Login</button>
+          <button onClick={handleLogin} disabled={busy} style={{ width: "100%", background: busy ? "#94a3b8" : "#dc2626", color: "#fff", border: "none", borderRadius: 10, padding: "13px", fontSize: 15, fontWeight: 700, cursor: busy ? "wait" : "pointer", fontFamily: "Georgia, serif", marginTop: 20 }}>{busy ? "Logging in..." : "Login"}</button>
           <div style={{ textAlign: "center", marginTop: 18, fontSize: 13, color: "#64748b", fontFamily: "sans-serif" }}>
             Don't have an account?{" "}
             <button onClick={() => { setMode("signup"); setError(""); }} style={{ background: "none", border: "none", color: "#dc2626", fontWeight: 700, cursor: "pointer", fontFamily: "Georgia, serif", padding: 0, fontSize: 13 }}>Create one</button>
@@ -559,7 +566,7 @@ function AuthScreen({ onLogin }) {
         <div style={{ height: 12 }} />
         <Field label="Confirm Password"><TInput type="password" value={confirmPassword} onChange={setConfirmPassword} placeholder="Repeat password" /></Field>
         {error && <div style={{ marginTop: 14, padding: "10px 12px", background: "#fee2e2", border: "1px solid #fca5a5", borderRadius: 8, fontSize: 13, color: "#b91c1c", fontFamily: "sans-serif" }}>⚠️ {error}</div>}
-        <button onClick={handleSignup} style={{ width: "100%", background: "#10b981", color: "#fff", border: "none", borderRadius: 10, padding: "13px", fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: "Georgia, serif", marginTop: 20 }}>Create Profile</button>
+        <button onClick={handleSignup} disabled={busy} style={{ width: "100%", background: busy ? "#94a3b8" : "#dc2626", color: "#fff", border: "none", borderRadius: 10, padding: "13px", fontSize: 15, fontWeight: 700, cursor: busy ? "wait" : "pointer", fontFamily: "Georgia, serif", marginTop: 20 }}>{busy ? "Creating profile..." : "Create Profile"}</button>
         <div style={{ textAlign: "center", marginTop: 18, fontSize: 13, color: "#64748b", fontFamily: "sans-serif" }}>
           Already have an account?{" "}
           <button onClick={() => { setMode("login"); setError(""); }} style={{ background: "none", border: "none", color: "#dc2626", fontWeight: 700, cursor: "pointer", fontFamily: "Georgia, serif", padding: 0, fontSize: 13 }}>Login</button>
