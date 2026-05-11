@@ -152,7 +152,7 @@ async function fbLogin(email, password) {
   try {
     const userDoc = await Promise.race([
       window.fbDB.collection("users").doc(cred.user.uid).get(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("profile fetch timeout")), 5000))
+      new Promise((_, reject) => setTimeout(() => reject(new Error("profile fetch timeout")), 3000))
     ]);
     if (userDoc.exists) {
       return { uid: cred.user.uid, email: cred.user.email, ...userDoc.data() };
@@ -439,14 +439,18 @@ function AuthScreen({ onLogin }) {
     if (!email.trim() || !password) { setError("Please enter email and password."); return; }
     if (!window.fbAuth) { setError("Firebase not loaded — check internet & refresh."); return; }
     setBusy(true);
+    console.log("[LOGIN] Starting login for", email);
     try {
-      // Add a 15-second timeout so the user never sees an endless spinner
+      // 20-second timeout. Use a tagged timeout so we can distinguish it from real errors.
       const loginPromise = fbLogin(email, password);
-      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject({ code: "auth/network-request-failed" }), 15000));
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject({ code: "client-timeout" }), 8000));
       const user = await Promise.race([loginPromise, timeoutPromise]);
+      console.log("[LOGIN] Success:", user);
       onLogin(user);
     } catch (err) {
+      console.error("[LOGIN] Failed. Full error:", err);
       const code = err.code || "";
+      const msg = err.message || "";
       if (code === "auth/user-not-found" || code === "auth/invalid-credential" || code === "auth/invalid-login-credentials") {
         setError("No account found, or wrong password.");
       } else if (code === "auth/wrong-password") {
@@ -454,9 +458,14 @@ function AuthScreen({ onLogin }) {
       } else if (code === "auth/invalid-email") {
         setError("That doesn't look like a valid email.");
       } else if (code === "auth/network-request-failed") {
-        setError("No internet connection. Check your data and try again.");
+        setError("Network blocked. Try a different network or disable VPN/ad-blocker.");
+      } else if (code === "auth/too-many-requests") {
+        setError("Too many attempts. Wait a few minutes and try again.");
+      } else if (code === "client-timeout") {
+        setError("Login took too long (8s). Try a different network — your current one may be blocking Google.");
       } else {
-        setError(err.message || "Login failed. Try again.");
+        // Show the actual error so we can diagnose
+        setError("Error: " + (code ? code + " — " : "") + (msg || "unknown"));
       }
     } finally {
       setBusy(false);
@@ -653,11 +662,11 @@ function App() {
     if (window.fbReady === false) { setLoading(false); return; }
     if (!window.fbAuth) { setFbError("Firebase not ready"); setLoading(false); return; }
     
-    // Safety timeout — if Firebase doesn't respond in 8s, stop loading and show login
+    // Safety timeout — if Firebase doesn't respond in 4s, stop loading and show login
     const timeoutId = setTimeout(() => {
       console.warn("Firebase auth check timed out, showing login screen");
       setLoading(false);
-    }, 8000);
+    }, 4000);
     
     // Firebase tracks login state automatically; restore session on page load.
     const unsub = window.fbAuth.onAuthStateChanged(async (fbUser) => {
@@ -666,7 +675,7 @@ function App() {
         try {
           // Fetch profile with a timeout — don't let a slow connection hang the app
           const profilePromise = window.fbDB.collection("users").doc(fbUser.uid).get();
-          const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000));
+          const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000));
           const doc = await Promise.race([profilePromise, timeoutPromise]).catch(() => null);
           const profile = (doc && doc.exists) ? doc.data() : { shopName: "My Shop", email: fbUser.email };
           setCurrentUser({ uid: fbUser.uid, email: fbUser.email, ...profile });
