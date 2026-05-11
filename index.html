@@ -63,7 +63,7 @@
       window.fbDB = firebase.firestore();
       window.fbReady = true;
       // Enable offline support so the app works without internet
-      try { window.fbDB.enablePersistence({ synchronizeTabs: true }); } catch (e) {}
+      // Note: offline persistence disabled to avoid Safari hang issues
     } catch (e) {
       console.error("Firebase init failed:", e);
       window.fbReady = false;
@@ -631,14 +631,28 @@ function AuthScreen({ onLogin }) {
 function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [fbError, setFbError] = useState(window.fbReady === false ? (window.fbInitError || "Firebase failed to load. Check internet.") : "");
 
   useEffect(() => {
+    if (window.fbReady === false) { setLoading(false); return; }
+    if (!window.fbAuth) { setFbError("Firebase not ready"); setLoading(false); return; }
+    
+    // Safety timeout — if Firebase doesn't respond in 8s, stop loading and show login
+    const timeoutId = setTimeout(() => {
+      console.warn("Firebase auth check timed out, showing login screen");
+      setLoading(false);
+    }, 8000);
+    
     // Firebase tracks login state automatically; restore session on page load.
     const unsub = window.fbAuth.onAuthStateChanged(async (fbUser) => {
+      clearTimeout(timeoutId);
       if (fbUser) {
         try {
-          const doc = await window.fbDB.collection("users").doc(fbUser.uid).get();
-          const profile = doc.exists ? doc.data() : { shopName: "My Shop", email: fbUser.email };
+          // Fetch profile with a timeout — don't let a slow connection hang the app
+          const profilePromise = window.fbDB.collection("users").doc(fbUser.uid).get();
+          const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000));
+          const doc = await Promise.race([profilePromise, timeoutPromise]).catch(() => null);
+          const profile = (doc && doc.exists) ? doc.data() : { shopName: "My Shop", email: fbUser.email };
           setCurrentUser({ uid: fbUser.uid, email: fbUser.email, ...profile });
         } catch (e) {
           setCurrentUser({ uid: fbUser.uid, email: fbUser.email, shopName: "My Shop" });
@@ -647,9 +661,27 @@ function App() {
         setCurrentUser(null);
       }
       setLoading(false);
+    }, (err) => {
+      console.error("Auth error:", err);
+      clearTimeout(timeoutId);
+      setFbError(err.message || "Auth error");
+      setLoading(false);
     });
-    return () => unsub();
+    return () => { clearTimeout(timeoutId); unsub(); };
   }, []);
+  
+  if (fbError) {
+    return (
+      <div style={{ minHeight: "100vh", background: "#0f172a", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+        <div style={{ background: "#fff", padding: 24, borderRadius: 12, maxWidth: 400, textAlign: "center" }}>
+          <div style={{ fontSize: 32, marginBottom: 10 }}>⚠️</div>
+          <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 8 }}>Couldn't connect</div>
+          <div style={{ fontSize: 13, color: "#64748b", marginBottom: 16, fontFamily: "sans-serif" }}>{fbError}</div>
+          <button onClick={() => window.location.reload()} style={{ background: "#dc2626", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontWeight: 700, cursor: "pointer", fontFamily: "sans-serif" }}>Retry</button>
+        </div>
+      </div>
+    );
+  }
 
   if (loading) {
     return (
