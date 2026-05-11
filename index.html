@@ -1,0 +1,2154 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#0f172a" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Wemo Curtains" />
+<link rel="manifest" href='data:application/manifest+json,{"name":"Wemo Curtains Business Tracker","short_name":"Wemo Curtains","start_url":".","display":"standalone","orientation":"portrait","background_color":"%230f172a","theme_color":"%236366f1"}' />
+<title>Wemo Curtains</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;padding:0;background:#0f172a;font-family:Georgia,serif;overscroll-behavior:none}
+  #root{min-height:100vh}
+  input,textarea,select,button{font-family:inherit}
+  /* Prevent iOS zoom on focus */
+  input,textarea,select{font-size:16px !important}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+
+<script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useEffect, useRef } = React;
+
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const uid = () => Math.random().toString(36).slice(2, 9);
+const fmt = (n) => `KSh ${Number(n || 0).toLocaleString("en-KE", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+const fmtShort = (n) => {
+  const v = Number(n || 0);
+  if (Math.abs(v) >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+  if (Math.abs(v) >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
+  return v.toLocaleString("en-KE");
+};
+const num = (v) => parseFloat(v) || 0;
+
+const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const MONTH_NAMES_FULL = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+const CATEGORIES = ["Curtains", "Blinds", "Rods & Tracks", "Accessories", "Installation", "Other"];
+const CAT_COLORS = {
+  Curtains: "#6366f1", Blinds: "#f59e0b", "Rods & Tracks": "#10b981",
+  Accessories: "#ec4899", Installation: "#3b82f6", Other: "#94a3b8",
+};
+
+const todayISO = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+const EMPTY_CLIENT = {
+  id: "", client: "", phone: "", email: "", location: "",
+  category: "Curtains", salesperson: "",
+  sales: "", deposit: "", cost: "", transport: "", allowance: "",
+  measurements: "", productDetails: "",
+  photos: [],
+  date: todayISO(), note: "", paid: false,
+};
+
+// NEW staff structure: each staff member has a profile with set salary
+const EMPTY_STAFF = { id: "", name: "", role: "", monthlySalary: "", joinDate: todayISO(), active: true };
+
+// Each transaction tracks salary payments OR advance payments tied to a staff
+const EMPTY_PAYMENT = { id: "", staffId: "", type: "Advance", amount: "", date: todayISO(), note: "" };
+
+// ── Image compression ─────────────────────────────────────────────────────────
+function compressImage(file, maxWidth = 1000, quality = 0.75) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, maxWidth / img.width);
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// ── Auth Storage ──────────────────────────────────────────────────────────────
+const AUTH_KEYS = { users: "wemo_users", session: "wemo_session" };
+
+function loadUsers() {
+  try { const r = localStorage.getItem(AUTH_KEYS.users); return r ? JSON.parse(r) : []; }
+  catch { return []; }
+}
+function saveUsers(users) {
+  try { localStorage.setItem(AUTH_KEYS.users, JSON.stringify(users)); } catch {}
+}
+function getSession() {
+  try { return localStorage.getItem(AUTH_KEYS.session); } catch { return null; }
+}
+function setSession(email) {
+  try { localStorage.setItem(AUTH_KEYS.session, email); } catch {}
+}
+function clearSession() {
+  try { localStorage.removeItem(AUTH_KEYS.session); } catch {}
+}
+
+function userClientsKey(email) { return `wemo_clients__${email}`; }
+function userStaffKey(email) { return `wemo_staff__${email}`; }
+function userPaymentsKey(email) { return `wemo_payments__${email}`; }
+
+function loadUserData(email) {
+  if (!email) return { clients: [], staff: [], payments: [] };
+  try {
+    const c = localStorage.getItem(userClientsKey(email));
+    const st = localStorage.getItem(userStaffKey(email));
+    const p = localStorage.getItem(userPaymentsKey(email));
+    // Try migrating from old salaries key
+    const oldSal = localStorage.getItem(`wemo_salaries__${email}`);
+    let migratedStaff = [];
+    let migratedPayments = [];
+    if (!st && oldSal) {
+      const oldData = JSON.parse(oldSal);
+      const nameMap = {};
+      oldData.forEach(s => {
+        if (!nameMap[s.name]) {
+          const sId = uid();
+          nameMap[s.name] = sId;
+          migratedStaff.push({
+            id: sId, name: s.name, role: "",
+            monthlySalary: "", joinDate: s.date || todayISO(), active: true,
+          });
+        }
+        migratedPayments.push({
+          id: uid(), staffId: nameMap[s.name],
+          type: s.type, amount: s.amount, date: s.date, note: s.note || "",
+        });
+      });
+    }
+    return {
+      clients: c ? JSON.parse(c) : [],
+      staff: st ? JSON.parse(st) : migratedStaff,
+      payments: p ? JSON.parse(p) : migratedPayments,
+    };
+  } catch { return { clients: [], staff: [], payments: [] }; }
+}
+function saveUserClients(email, data) {
+  if (!email) return;
+  try { localStorage.setItem(userClientsKey(email), JSON.stringify(data)); }
+  catch (e) {
+    if (e.name === "QuotaExceededError") {
+      alert("⚠️ Phone storage is getting full. Try removing some photos from older entries.");
+    }
+  }
+}
+function saveUserStaff(email, data) {
+  if (!email) return;
+  try { localStorage.setItem(userStaffKey(email), JSON.stringify(data)); } catch {}
+}
+function saveUserPayments(email, data) {
+  if (!email) return;
+  try { localStorage.setItem(userPaymentsKey(email), JSON.stringify(data)); } catch {}
+}
+
+function monthKey(dateStr) {
+  if (!dateStr) return "no-date";
+  return dateStr.slice(0, 7);
+}
+function formatMonthKey(key) {
+  if (key === "no-date") return "No Date";
+  const [y, m] = key.split("-");
+  return `${MONTH_NAMES_FULL[parseInt(m, 10) - 1]} ${y}`;
+}
+function formatMonthKeyShort(key) {
+  if (key === "no-date") return "No Date";
+  const [y, m] = key.split("-");
+  return `${MONTH_NAMES[parseInt(m, 10) - 1]} ${y}`;
+}
+
+// ── Reusable UI ───────────────────────────────────────────────────────────────
+function Label({ children }) {
+  return <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", color: "#94a3b8", fontFamily: "sans-serif", marginBottom: 4 }}>{children}</div>;
+}
+function Field({ label, children, span }) {
+  return <div style={span ? { gridColumn: `span ${span}` } : {}}><Label>{label}</Label>{children}</div>;
+}
+function TInput({ value, onChange, placeholder, type = "text" }) {
+  return (
+    <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+      style={{
+        width: "100%", border: "1.5px solid #e2e8f0", borderRadius: 8,
+        padding: "10px 12px", fontSize: 15, fontFamily: "Georgia, serif",
+        color: "#0f172a", background: "#f8fafc", boxSizing: "border-box", outline: "none",
+      }} />
+  );
+}
+function TArea({ value, onChange, placeholder, rows = 3 }) {
+  return (
+    <textarea value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} rows={rows}
+      style={{
+        width: "100%", border: "1.5px solid #e2e8f0", borderRadius: 8,
+        padding: "10px 12px", fontSize: 14, fontFamily: "Georgia, serif",
+        color: "#0f172a", background: "#f8fafc", boxSizing: "border-box", outline: "none",
+        resize: "vertical", lineHeight: 1.5,
+      }} />
+  );
+}
+function TSelect({ value, onChange, children }) {
+  return (
+    <select value={value} onChange={e => onChange(e.target.value)} style={{
+      width: "100%", border: "1.5px solid #e2e8f0", borderRadius: 8,
+      padding: "10px 12px", fontSize: 15, fontFamily: "Georgia, serif",
+      color: "#0f172a", background: "#f8fafc", cursor: "pointer", outline: "none",
+    }}>{children}</select>
+  );
+}
+function PaidToggle({ checked, onToggle, size = "md" }) {
+  const dim = size === "lg" ? 24 : 20;
+  return (
+    <button onClick={(e) => { e.stopPropagation(); onToggle(); }} style={{
+      width: dim, height: dim, borderRadius: 6,
+      border: checked ? "none" : "2px solid #cbd5e1",
+      background: checked ? "#10b981" : "#fff",
+      color: "#fff", cursor: "pointer", flexShrink: 0,
+      display: "flex", alignItems: "center", justifyContent: "center",
+      fontSize: dim * 0.6, fontWeight: 800, padding: 0,
+      boxShadow: checked ? "0 2px 6px rgba(16,185,129,0.35)" : "none",
+    }}>{checked ? "✓" : ""}</button>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── PHOTO UPLOADER ────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+function PhotoUploader({ photos, onChange }) {
+  const fileInputRef = useRef(null);
+  const cameraInputRef = useRef(null);
+  const [uploading, setUploading] = useState(false);
+  const [previewPhoto, setPreviewPhoto] = useState(null);
+
+  const handleFiles = async (files) => {
+    if (!files || !files.length) return;
+    setUploading(true);
+    const newPhotos = [];
+    for (let file of files) {
+      if (!file.type.startsWith("image/")) continue;
+      try {
+        const dataUrl = await compressImage(file);
+        newPhotos.push({ id: uid(), dataUrl, caption: "" });
+      } catch (err) { console.error(err); }
+    }
+    onChange([...photos, ...newPhotos]);
+    setUploading(false);
+  };
+
+  const removePhoto = (id) => onChange(photos.filter(p => p.id !== id));
+  const updateCaption = (id, caption) => onChange(photos.map(p => p.id === id ? { ...p, caption } : p));
+
+  return (
+    <div>
+      <input ref={fileInputRef} type="file" accept="image/*" multiple style={{ display: "none" }}
+        onChange={e => { handleFiles(e.target.files); e.target.value = ""; }} />
+      <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }}
+        onChange={e => { handleFiles(e.target.files); e.target.value = ""; }} />
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+        <button onClick={() => cameraInputRef.current?.click()} disabled={uploading} style={{
+          background: "#6366f1", color: "#fff", border: "none",
+          borderRadius: 8, padding: "11px", fontSize: 13, fontWeight: 700,
+          cursor: "pointer", fontFamily: "Georgia, serif", opacity: uploading ? 0.6 : 1,
+        }}>📷 Take Photo</button>
+        <button onClick={() => fileInputRef.current?.click()} disabled={uploading} style={{
+          background: "#fff", color: "#6366f1",
+          border: "1.5px solid #6366f1", borderRadius: 8, padding: "11px",
+          fontSize: 13, fontWeight: 700, cursor: "pointer",
+          fontFamily: "Georgia, serif", opacity: uploading ? 0.6 : 1,
+        }}>🖼 Choose from Gallery</button>
+      </div>
+
+      {uploading && <div style={{ textAlign: "center", padding: "10px", color: "#6366f1", fontSize: 13, fontFamily: "sans-serif" }}>⏳ Processing...</div>}
+
+      {photos.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 8 }}>
+          {photos.map(photo => (
+            <div key={photo.id} style={{ position: "relative", borderRadius: 10, overflow: "hidden", boxShadow: "0 2px 6px rgba(15,23,42,0.1)", background: "#f1f5f9" }}>
+              <button onClick={() => setPreviewPhoto(photo)} style={{ width: "100%", height: 100, padding: 0, border: "none", background: "none", cursor: "pointer", display: "block" }}>
+                <img src={photo.dataUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+              </button>
+              <button onClick={() => { if (window.confirm("Remove?")) removePhoto(photo.id); }} style={{
+                position: "absolute", top: 4, right: 4,
+                background: "rgba(239,68,68,0.92)", color: "#fff",
+                border: "none", borderRadius: "50%", width: 22, height: 22,
+                fontSize: 12, fontWeight: 800, cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>✕</button>
+              <input value={photo.caption} onChange={e => updateCaption(photo.id, e.target.value)} placeholder="Caption…"
+                style={{
+                  width: "100%", border: "none", outline: "none",
+                  padding: "6px 8px", fontSize: 11, fontFamily: "sans-serif",
+                  background: "#fff", color: "#0f172a",
+                  borderTop: "1px solid #e2e8f0", boxSizing: "border-box",
+                }} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {photos.length === 0 && !uploading && (
+        <div style={{ border: "1.5px dashed #cbd5e1", borderRadius: 10, padding: "20px", textAlign: "center", color: "#94a3b8", fontSize: 13, fontFamily: "sans-serif" }}>
+          No photos yet.
+        </div>
+      )}
+
+      {previewPhoto && <PhotoPreview photo={previewPhoto} onClose={() => setPreviewPhoto(null)} />}
+    </div>
+  );
+}
+
+function PhotoPreview({ photo, onClose }) {
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)",
+      zIndex: 400, display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
+    }}>
+      <button onClick={onClose} style={{
+        position: "absolute", top: 16, right: 16,
+        background: "rgba(255,255,255,0.15)", color: "#fff",
+        border: "none", borderRadius: "50%", width: 40, height: 40,
+        fontSize: 18, cursor: "pointer", zIndex: 10,
+      }}>✕</button>
+      <img src={photo.dataUrl} alt="" style={{
+        maxWidth: "100%", maxHeight: "85vh", objectFit: "contain",
+        borderRadius: 8, boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+      }} />
+      {photo.caption && (
+        <div style={{
+          position: "absolute", bottom: 30, left: 16, right: 16,
+          background: "rgba(0,0,0,0.7)", color: "#fff",
+          padding: "10px 14px", borderRadius: 8, textAlign: "center",
+          fontSize: 14, fontFamily: "sans-serif",
+        }}>{photo.caption}</div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── AUTH SCREEN ───────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+function AuthScreen({ onLogin }) {
+  const [mode, setMode] = useState("welcome");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [shopName, setShopName] = useState("");
+  const [error, setError] = useState("");
+
+  const handleLogin = () => {
+    setError("");
+    if (!email.trim() || !password) { setError("Please enter email and password."); return; }
+    const users = loadUsers();
+    const user = users.find(u => u.email.toLowerCase() === email.trim().toLowerCase());
+    if (!user) { setError("No account found. Try creating a profile."); return; }
+    if (user.password !== password) { setError("Wrong password."); return; }
+    setSession(user.email);
+    onLogin(user);
+  };
+
+  const handleSignup = () => {
+    setError("");
+    if (!email.trim() || !password || !shopName.trim()) { setError("Please fill in all fields."); return; }
+    if (password.length < 4) { setError("Password must be at least 4 characters."); return; }
+    if (password !== confirmPassword) { setError("Passwords don't match."); return; }
+    const users = loadUsers();
+    if (users.find(u => u.email.toLowerCase() === email.trim().toLowerCase())) {
+      setError("Account already exists. Login instead."); return;
+    }
+    const newUser = { email: email.trim().toLowerCase(), password, shopName: shopName.trim(), createdAt: new Date().toISOString() };
+    users.push(newUser);
+    saveUsers(users);
+    setSession(newUser.email);
+    onLogin(newUser);
+  };
+
+  const containerStyle = {
+    minHeight: "100vh",
+    background: "linear-gradient(135deg, #0f172a 0%, #1e3a5f 50%, #6366f1 100%)",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    padding: 16, fontFamily: "Georgia, serif",
+  };
+  const cardStyle = { background: "#fff", borderRadius: 18, padding: "32px 26px", width: "100%", maxWidth: 380, boxShadow: "0 20px 60px rgba(0,0,0,0.35)" };
+
+  if (mode === "welcome") {
+    const userCount = loadUsers().length;
+    return (
+      <div style={containerStyle}>
+        <div style={cardStyle}>
+          <div style={{ textAlign: "center", marginBottom: 28 }}>
+            <div style={{ fontSize: 56, marginBottom: 8 }}>🪟</div>
+            <div style={{ fontSize: 26, fontWeight: 800, color: "#0f172a", letterSpacing: -0.5 }}>Wemo Curtains</div>
+            <div style={{ fontSize: 11, color: "#94a3b8", letterSpacing: 3, textTransform: "uppercase", fontFamily: "sans-serif", marginTop: 4 }}>Business Tracker</div>
+          </div>
+          <div style={{ background: "#f8fafc", borderRadius: 12, padding: "16px", marginBottom: 24, textAlign: "center" }}>
+            <div style={{ fontSize: 13, color: "#475569", fontFamily: "sans-serif", lineHeight: 1.6 }}>
+              Welcome! Track your sales, costs, and profits.
+              {userCount > 0 && <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 6 }}>{userCount} account{userCount !== 1 ? "s" : ""} on this device</div>}
+            </div>
+          </div>
+          <button onClick={() => { setMode("login"); setError(""); }} style={{
+            width: "100%", background: "#6366f1", color: "#fff",
+            border: "none", borderRadius: 10, padding: "14px",
+            fontSize: 15, fontWeight: 700, cursor: "pointer",
+            fontFamily: "Georgia, serif", marginBottom: 10,
+          }}>🔓 Login to my account</button>
+          <button onClick={() => { setMode("signup"); setError(""); }} style={{
+            width: "100%", background: "#fff", color: "#6366f1",
+            border: "2px solid #6366f1", borderRadius: 10, padding: "13px",
+            fontSize: 15, fontWeight: 700, cursor: "pointer",
+            fontFamily: "Georgia, serif",
+          }}>➕ Create new profile</button>
+          <div style={{ marginTop: 22, padding: "10px 12px", background: "#fef3c7", borderRadius: 8, fontSize: 11, color: "#92400e", fontFamily: "sans-serif", textAlign: "center", lineHeight: 1.5 }}>
+            🔒 Demo mode. Firebase will sync across phone & MacBook.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (mode === "login") {
+    return (
+      <div style={containerStyle}>
+        <div style={cardStyle}>
+          <button onClick={() => { setMode("welcome"); setError(""); }} style={{ background: "none", border: "none", color: "#64748b", fontSize: 13, cursor: "pointer", fontFamily: "Georgia, serif", marginBottom: 12, padding: 0 }}>← Back</button>
+          <div style={{ marginBottom: 24 }}>
+            <div style={{ fontSize: 22, fontWeight: 800, color: "#0f172a", marginBottom: 4 }}>Welcome back 👋</div>
+            <div style={{ fontSize: 13, color: "#64748b", fontFamily: "sans-serif" }}>Login to access your business data.</div>
+          </div>
+          <Field label="Email"><TInput type="email" value={email} onChange={setEmail} placeholder="you@example.com" /></Field>
+          <div style={{ height: 12 }} />
+          <Field label="Password"><TInput type="password" value={password} onChange={setPassword} placeholder="Your password" /></Field>
+          {error && <div style={{ marginTop: 14, padding: "10px 12px", background: "#fee2e2", border: "1px solid #fca5a5", borderRadius: 8, fontSize: 13, color: "#b91c1c", fontFamily: "sans-serif" }}>⚠️ {error}</div>}
+          <button onClick={handleLogin} style={{ width: "100%", background: "#6366f1", color: "#fff", border: "none", borderRadius: 10, padding: "13px", fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: "Georgia, serif", marginTop: 20 }}>Login</button>
+          <div style={{ textAlign: "center", marginTop: 18, fontSize: 13, color: "#64748b", fontFamily: "sans-serif" }}>
+            Don't have an account?{" "}
+            <button onClick={() => { setMode("signup"); setError(""); }} style={{ background: "none", border: "none", color: "#6366f1", fontWeight: 700, cursor: "pointer", fontFamily: "Georgia, serif", padding: 0, fontSize: 13 }}>Create one</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={containerStyle}>
+      <div style={cardStyle}>
+        <button onClick={() => { setMode("welcome"); setError(""); }} style={{ background: "none", border: "none", color: "#64748b", fontSize: 13, cursor: "pointer", fontFamily: "Georgia, serif", marginBottom: 12, padding: 0 }}>← Back</button>
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ fontSize: 22, fontWeight: 800, color: "#0f172a", marginBottom: 4 }}>Create profile</div>
+        </div>
+        <Field label="Shop Name"><TInput value={shopName} onChange={setShopName} placeholder="e.g. Wemo Curtains" /></Field>
+        <div style={{ height: 12 }} />
+        <Field label="Email"><TInput type="email" value={email} onChange={setEmail} placeholder="you@example.com" /></Field>
+        <div style={{ height: 12 }} />
+        <Field label="Password"><TInput type="password" value={password} onChange={setPassword} placeholder="Min 4 characters" /></Field>
+        <div style={{ height: 12 }} />
+        <Field label="Confirm Password"><TInput type="password" value={confirmPassword} onChange={setConfirmPassword} placeholder="Repeat password" /></Field>
+        {error && <div style={{ marginTop: 14, padding: "10px 12px", background: "#fee2e2", border: "1px solid #fca5a5", borderRadius: 8, fontSize: 13, color: "#b91c1c", fontFamily: "sans-serif" }}>⚠️ {error}</div>}
+        <button onClick={handleSignup} style={{ width: "100%", background: "#10b981", color: "#fff", border: "none", borderRadius: 10, padding: "13px", fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: "Georgia, serif", marginTop: 20 }}>Create Profile</button>
+        <div style={{ textAlign: "center", marginTop: 18, fontSize: 13, color: "#64748b", fontFamily: "sans-serif" }}>
+          Already have an account?{" "}
+          <button onClick={() => { setMode("login"); setError(""); }} style={{ background: "none", border: "none", color: "#6366f1", fontWeight: 700, cursor: "pointer", fontFamily: "Georgia, serif", padding: 0, fontSize: 13 }}>Login</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── ROOT APP ──────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+function App() {
+  const [currentUser, setCurrentUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const sessionEmail = getSession();
+    if (sessionEmail) {
+      const users = loadUsers();
+      const user = users.find(u => u.email === sessionEmail);
+      if (user) setCurrentUser(user); else clearSession();
+    }
+    setLoading(false);
+  }, []);
+
+  if (loading) {
+    return (
+      <div style={{ minHeight: "100vh", background: "#0f172a", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontFamily: "Georgia, serif" }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 42 }}>🪟</div>
+          <div style={{ marginTop: 8, fontSize: 13, color: "#94a3b8" }}>Loading…</div>
+        </div>
+      </div>
+    );
+  }
+  if (!currentUser) return <AuthScreen onLogin={setCurrentUser} />;
+  return <Dashboard user={currentUser} onLogout={() => { clearSession(); setCurrentUser(null); }} />;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── DASHBOARD ─────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+function Dashboard({ user, onLogout }) {
+  const [tab, setTab] = useState("summary");
+  const initial = useMemo(() => loadUserData(user.email), [user.email]);
+  const [clients, setClients] = useState(initial.clients);
+  const [staff, setStaff] = useState(initial.staff);
+  const [payments, setPayments] = useState(initial.payments);
+
+  useEffect(() => { saveUserClients(user.email, clients); }, [clients, user.email]);
+  useEffect(() => { saveUserStaff(user.email, staff); }, [staff, user.email]);
+  useEffect(() => { saveUserPayments(user.email, payments); }, [payments, user.email]);
+
+  const [selectedMonth, setSelectedMonth] = useState(() => todayISO().slice(0, 7));
+  const [filter, setFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [viewingClient, setViewingClient] = useState(null);
+  const [viewingStaff, setViewingStaff] = useState(null);
+
+  const [cForm, setCForm] = useState({ ...EMPTY_CLIENT, id: uid() });
+  const [cEditing, setCEditing] = useState(null);
+  const [cOpen, setCOpen] = useState(false);
+
+  // Staff form state
+  const [stForm, setStForm] = useState({ ...EMPTY_STAFF, id: uid() });
+  const [stEditing, setStEditing] = useState(null);
+  const [stOpen, setStOpen] = useState(false);
+
+  // Payment form state
+  const [pForm, setPForm] = useState({ ...EMPTY_PAYMENT, id: uid() });
+  const [pEditing, setPEditing] = useState(null);
+  const [pOpen, setPOpen] = useState(false);
+
+  const [clientSearch, setClientSearch] = useState("");
+
+  const allClientRows = clients.map(c => ({
+    ...c,
+    photos: c.photos || [],
+    balance: Math.max(0, num(c.sales) - num(c.deposit)),
+    profit: num(c.sales) - num(c.cost) - num(c.transport) - num(c.allowance),
+    monthKey: monthKey(c.date),
+  }));
+
+  const knownSalespeople = useMemo(() => {
+    const set = new Set();
+    staff.forEach(s => { if (s.name?.trim()) set.add(s.name.trim()); });
+    clients.forEach(c => { if (c.salesperson?.trim()) set.add(c.salesperson.trim()); });
+    return [...set];
+  }, [staff, clients]);
+
+  const availableMonths = useMemo(() => {
+    const set = new Set(allClientRows.map(r => r.monthKey).filter(k => k !== "no-date"));
+    payments.forEach(p => { const k = monthKey(p.date); if (k !== "no-date") set.add(k); });
+    set.add(todayISO().slice(0, 7));
+    return [...set].sort().reverse();
+  }, [allClientRows, payments]);
+
+  const prevMonthKey = useMemo(() => {
+    const [y, m] = selectedMonth.split("-").map(Number);
+    const prev = new Date(y, m - 2, 1);
+    return `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, "0")}`;
+  }, [selectedMonth]);
+
+  const monthRows = useMemo(() => allClientRows.filter(r => r.monthKey === selectedMonth), [allClientRows, selectedMonth]);
+  const monthPayments = useMemo(() => payments.filter(p => monthKey(p.date) === selectedMonth), [payments, selectedMonth]);
+  const prevMonthRows = useMemo(() => allClientRows.filter(r => r.monthKey === prevMonthKey), [allClientRows, prevMonthKey]);
+  const prevMonthPayments = useMemo(() => payments.filter(p => monthKey(p.date) === prevMonthKey), [payments, prevMonthKey]);
+
+  // Per-staff per-month breakdown
+  const staffMonthBreakdown = useMemo(() => {
+    return staff.map(s => {
+      const monthPays = monthPayments.filter(p => p.staffId === s.id);
+      const advances = monthPays.filter(p => p.type === "Advance").reduce((a, p) => a + num(p.amount), 0);
+      const salaryPaid = monthPays.filter(p => p.type === "Salary").reduce((a, p) => a + num(p.amount), 0);
+      const monthlySalary = num(s.monthlySalary);
+      // What's left = salary - advances - salary paid
+      const remaining = monthlySalary - advances - salaryPaid;
+      return { ...s, advances, salaryPaid, monthlySalary, remaining, totalPaid: advances + salaryPaid };
+    });
+  }, [staff, monthPayments]);
+
+  const totalsFor = (rows, pays) => {
+    const sales = rows.reduce((s, r) => s + num(r.sales), 0);
+    const deposit = rows.reduce((s, r) => s + num(r.deposit), 0);
+    const balance = rows.reduce((s, r) => s + r.balance, 0);
+    const cost = rows.reduce((s, r) => s + num(r.cost), 0);
+    const transport = rows.reduce((s, r) => s + num(r.transport), 0);
+    const allowance = rows.reduce((s, r) => s + num(r.allowance), 0);
+    const profit = rows.reduce((s, r) => s + r.profit, 0);
+    const salTotal = pays.filter(p => p.type === "Salary").reduce((a, p) => a + num(p.amount), 0);
+    const advTotal = pays.filter(p => p.type === "Advance").reduce((a, p) => a + num(p.amount), 0);
+    return {
+      sales, deposit, balance, cost, transport, allowance, profit,
+      salTotal, advTotal, staffTotal: salTotal + advTotal,
+      net: profit - salTotal - advTotal, count: rows.length,
+    };
+  };
+
+  const monthTotals = useMemo(() => totalsFor(monthRows, monthPayments), [monthRows, monthPayments]);
+  const prevTotals = useMemo(() => totalsFor(prevMonthRows, prevMonthPayments), [prevMonthRows, prevMonthPayments]);
+
+  const visibleRows = useMemo(() => {
+    let rows = [...monthRows];
+    if (filter === "unpaid") rows = rows.filter(r => !r.paid && r.balance > 0);
+    if (filter === "paid") rows = rows.filter(r => r.paid || r.balance <= 0);
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      rows = rows.filter(r =>
+        r.client.toLowerCase().includes(q) ||
+        (r.phone || "").toLowerCase().includes(q) ||
+        (r.location || "").toLowerCase().includes(q) ||
+        (r.salesperson || "").toLowerCase().includes(q) ||
+        r.category.toLowerCase().includes(q)
+      );
+    }
+    return rows;
+  }, [monthRows, filter, search]);
+
+  const allClientsSearch = useMemo(() => {
+    let rows = [...allClientRows].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+    if (clientSearch.trim()) {
+      const q = clientSearch.toLowerCase();
+      rows = rows.filter(r =>
+        r.client.toLowerCase().includes(q) ||
+        (r.phone || "").toLowerCase().includes(q) ||
+        (r.location || "").toLowerCase().includes(q) ||
+        (r.salesperson || "").toLowerCase().includes(q) ||
+        (r.measurements || "").toLowerCase().includes(q) ||
+        (r.productDetails || "").toLowerCase().includes(q) ||
+        r.category.toLowerCase().includes(q)
+      );
+    }
+    return rows;
+  }, [allClientRows, clientSearch]);
+
+  const unpaidCount = monthRows.filter(r => !r.paid && r.balance > 0).length;
+
+  const monthCategoryTotals = useMemo(() => {
+    const map = {};
+    CATEGORIES.forEach(cat => { map[cat] = { sales: 0, cost: 0, transport: 0, allowance: 0, profit: 0, count: 0 }; });
+    monthRows.forEach(r => {
+      const m = map[r.category] || { sales: 0, cost: 0, transport: 0, allowance: 0, profit: 0, count: 0 };
+      m.sales += num(r.sales); m.cost += num(r.cost);
+      m.transport += num(r.transport); m.allowance += num(r.allowance);
+      m.profit += r.profit; m.count++;
+      map[r.category] = m;
+    });
+    return map;
+  }, [monthRows]);
+
+  // Client CRUD
+  const saveClient = () => {
+    if (!cForm.client.trim() || !cForm.sales) return;
+    const date = cForm.date || todayISO();
+    if (cEditing) {
+      setClients(prev => prev.map(c => c.id === cEditing ? { ...cForm, date } : c));
+      setCEditing(null);
+    } else {
+      setClients(prev => [{ ...cForm, date }, ...prev]);
+    }
+    setCForm({ ...EMPTY_CLIENT, id: uid(), photos: [] });
+    setCOpen(false);
+  };
+  const editClient = (c) => { setCEditing(c.id); setCForm({ ...c, photos: c.photos || [] }); setCOpen(true); setViewingClient(null); setTab("sales"); };
+  const deleteClient = (id) => { if (window.confirm("Delete this entry?")) { setClients(p => p.filter(c => c.id !== id)); setViewingClient(null); } };
+  const cancelClient = () => { setCEditing(null); setCForm({ ...EMPTY_CLIENT, id: uid(), photos: [] }); setCOpen(false); };
+  const togglePaid = (id) => setClients(p => p.map(c => c.id === id ? { ...c, paid: !c.paid } : c));
+  const reorderForClient = (c) => {
+    const newEntry = {
+      ...c, id: uid(), date: todayISO(),
+      sales: "", deposit: "", cost: "", transport: "", allowance: "",
+      paid: false, note: `Repeat order from ${c.date}`,
+      photos: c.photos || [],
+    };
+    setCEditing(null); setCForm(newEntry); setCOpen(true);
+    setViewingClient(null); setTab("sales");
+  };
+
+  // STAFF CRUD
+  const saveStaff = () => {
+    if (!stForm.name.trim()) return;
+    if (stEditing) {
+      setStaff(prev => prev.map(s => s.id === stEditing ? { ...stForm } : s));
+      setStEditing(null);
+    } else {
+      setStaff(prev => [...prev, { ...stForm }]);
+    }
+    setStForm({ ...EMPTY_STAFF, id: uid() });
+    setStOpen(false);
+  };
+  const editStaff = (s) => { setStEditing(s.id); setStForm({ ...s }); setStOpen(true); setViewingStaff(null); };
+  const deleteStaff = (id) => {
+    const hasPayments = payments.some(p => p.staffId === id);
+    let msg = "Delete this staff member?";
+    if (hasPayments) msg += "\n\n⚠️ All their salary/advance records will also be deleted.";
+    if (window.confirm(msg)) {
+      setStaff(p => p.filter(s => s.id !== id));
+      setPayments(p => p.filter(pay => pay.staffId !== id));
+      setViewingStaff(null);
+    }
+  };
+  const cancelStaff = () => { setStEditing(null); setStForm({ ...EMPTY_STAFF, id: uid() }); setStOpen(false); };
+  const toggleStaffActive = (id) => setStaff(p => p.map(s => s.id === id ? { ...s, active: !s.active } : s));
+
+  // PAYMENT CRUD
+  const savePayment = () => {
+    if (!pForm.staffId || !pForm.amount) return;
+    const date = pForm.date || todayISO();
+    if (pEditing) {
+      setPayments(prev => prev.map(p => p.id === pEditing ? { ...pForm, date } : p));
+      setPEditing(null);
+    } else {
+      setPayments(prev => [{ ...pForm, date }, ...prev]);
+    }
+    setPForm({ ...EMPTY_PAYMENT, id: uid() });
+    setPOpen(false);
+  };
+  const editPayment = (p) => { setPEditing(p.id); setPForm({ ...p }); setPOpen(true); };
+  const deletePayment = (id) => { if (window.confirm("Delete this payment?")) setPayments(prev => prev.filter(p => p.id !== id)); };
+  const cancelPayment = () => { setPEditing(null); setPForm({ ...EMPTY_PAYMENT, id: uid() }); setPOpen(false); };
+
+  // Quick action: pay full remaining salary
+  const payRemainingSalary = (staffId, remaining) => {
+    if (remaining <= 0) return;
+    const s = staff.find(x => x.id === staffId);
+    if (!s) return;
+    if (window.confirm(`Pay ${fmt(remaining)} to ${s.name} as salary?`)) {
+      setPayments(prev => [{
+        id: uid(),
+        staffId,
+        type: "Salary",
+        amount: String(remaining),
+        date: todayISO(),
+        note: `${formatMonthKeyShort(selectedMonth)} salary payment`,
+      }, ...prev]);
+    }
+  };
+
+  // Quick advance
+  const giveAdvance = (staffId) => {
+    setPEditing(null);
+    setPForm({ ...EMPTY_PAYMENT, id: uid(), staffId, type: "Advance" });
+    setPOpen(true);
+    setViewingStaff(null);
+  };
+
+  const today = new Date().toLocaleDateString("en-KE", { day: "numeric", month: "long", year: "numeric" });
+  const previewBalance = Math.max(0, num(cForm.sales) - num(cForm.deposit));
+  const previewProfit = num(cForm.sales) - num(cForm.cost) - num(cForm.transport) - num(cForm.allowance);
+  const showPreview = cForm.sales || cForm.deposit || cForm.cost || cForm.transport || cForm.allowance;
+
+  const pctChange = (current, previous) => {
+    if (!previous) return null;
+    return ((current - previous) / Math.abs(previous)) * 100;
+  };
+
+  const handleLogout = () => { if (window.confirm("Logout?")) onLogout(); };
+  const initials = (user.shopName || user.email).slice(0, 2).toUpperCase();
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#f1f5f9", fontFamily: "Georgia, serif", paddingBottom: 80 }}>
+      {/* HEADER */}
+      <div style={{
+        background: "linear-gradient(135deg, #0f172a 0%, #1e3a5f 100%)",
+        color: "#fff", padding: "0 16px", position: "sticky", top: 0, zIndex: 100,
+        boxShadow: "0 3px 20px rgba(0,0,0,0.3)",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", height: 56 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 17, fontWeight: 800, letterSpacing: -0.3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>🪟 {user.shopName}</div>
+            <div style={{ fontSize: 10, color: "#94a3b8", letterSpacing: 2, textTransform: "uppercase", fontFamily: "sans-serif", marginTop: -2 }}>KSh · {today}</div>
+          </div>
+          <button onClick={() => setProfileOpen(true)} style={{
+            width: 38, height: 38, borderRadius: "50%",
+            background: "#6366f1", color: "#fff",
+            border: "2px solid rgba(255,255,255,0.2)",
+            cursor: "pointer", fontSize: 13, fontWeight: 800,
+            fontFamily: "sans-serif",
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}>{initials}</button>
+        </div>
+        <div style={{ display: "flex", gap: 4, paddingBottom: 10, overflowX: "auto" }}>
+          {[
+            { key: "summary", label: "📅 Monthly" },
+            { key: "sales", label: "💼 Sales" },
+            { key: "clients", label: "👤 Clients" },
+            { key: "categories", label: "📊 Categories" },
+            { key: "staff", label: "👥 Staff" },
+          ].map(t => (
+            <button key={t.key} onClick={() => setTab(t.key)} style={{
+              padding: "7px 14px", borderRadius: 20, border: "none", whiteSpace: "nowrap",
+              background: tab === t.key ? "#6366f1" : "rgba(255,255,255,0.08)",
+              color: tab === t.key ? "#fff" : "#94a3b8",
+              fontSize: 13, cursor: "pointer", fontFamily: "Georgia, serif",
+            }}>{t.label}</button>
+          ))}
+        </div>
+      </div>
+
+      {profileOpen && (
+        <div style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)",
+          zIndex: 200, display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 70,
+        }} onClick={() => setProfileOpen(false)}>
+          <div style={{
+            background: "#fff", borderRadius: 14, padding: "20px",
+            width: "calc(100% - 32px)", maxWidth: 360,
+            boxShadow: "0 20px 60px rgba(0,0,0,0.3)",
+          }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 20 }}>
+              <div style={{
+                width: 56, height: 56, borderRadius: "50%",
+                background: "linear-gradient(135deg, #6366f1, #4f46e5)",
+                color: "#fff", display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 18, fontWeight: 800, fontFamily: "sans-serif",
+              }}>{initials}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 16, fontWeight: 800, color: "#0f172a", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{user.shopName}</div>
+                <div style={{ fontSize: 12, color: "#64748b", fontFamily: "sans-serif", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{user.email}</div>
+              </div>
+            </div>
+            <button onClick={() => { setProfileOpen(false); handleLogout(); }} style={{
+              width: "100%", background: "#ef4444", color: "#fff",
+              border: "none", borderRadius: 10, padding: "12px",
+              fontSize: 14, fontWeight: 700, cursor: "pointer",
+              fontFamily: "Georgia, serif", marginBottom: 8,
+            }}>🔒 Logout</button>
+            <button onClick={() => setProfileOpen(false)} style={{
+              width: "100%", background: "transparent", color: "#64748b",
+              border: "1.5px solid #e2e8f0", borderRadius: 10, padding: "10px",
+              fontSize: 13, cursor: "pointer", fontFamily: "Georgia, serif",
+            }}>Close</button>
+          </div>
+        </div>
+      )}
+
+      {viewingClient && <ClientDetailModal client={viewingClient} onClose={() => setViewingClient(null)} onEdit={() => editClient(viewingClient)} onDelete={() => deleteClient(viewingClient.id)} onReorder={() => reorderForClient(viewingClient)} />}
+
+      {viewingStaff && <StaffDetailModal
+        staff={viewingStaff}
+        breakdown={staffMonthBreakdown.find(s => s.id === viewingStaff.id)}
+        payments={payments.filter(p => p.staffId === viewingStaff.id).sort((a, b) => b.date.localeCompare(a.date))}
+        currentMonth={selectedMonth}
+        onClose={() => setViewingStaff(null)}
+        onEdit={() => editStaff(viewingStaff)}
+        onDelete={() => deleteStaff(viewingStaff.id)}
+        onGiveAdvance={() => giveAdvance(viewingStaff.id)}
+        onPayRemaining={(remaining) => { payRemainingSalary(viewingStaff.id, remaining); setViewingStaff(null); }}
+        onEditPayment={(p) => { setViewingStaff(null); editPayment(p); }}
+        onDeletePayment={deletePayment}
+        onToggleActive={() => toggleStaffActive(viewingStaff.id)}
+      />}
+
+      <div style={{ padding: "16px", maxWidth: 700, margin: "0 auto" }}>
+        {(tab === "summary" || tab === "sales" || tab === "categories" || tab === "staff") && (
+          <div style={{
+            background: "#fff", borderRadius: 12, padding: "12px 14px",
+            marginBottom: 14, boxShadow: "0 2px 8px rgba(15,23,42,0.06)",
+            display: "flex", alignItems: "center", gap: 10,
+          }}>
+            <div style={{ fontSize: 11, letterSpacing: 1.5, textTransform: "uppercase", color: "#94a3b8", fontFamily: "sans-serif", fontWeight: 700 }}>📅 Viewing</div>
+            <select value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)} style={{
+              flex: 1, border: "1.5px solid #e2e8f0", borderRadius: 8,
+              padding: "8px 10px", fontSize: 14, fontWeight: 700,
+              fontFamily: "Georgia, serif", color: "#0f172a",
+              background: "#f8fafc", cursor: "pointer", outline: "none",
+            }}>
+              {availableMonths.map(m => <option key={m} value={m}>{formatMonthKey(m)}</option>)}
+            </select>
+          </div>
+        )}
+
+        {tab === "summary" && (
+          <MonthlySummary
+            monthTotals={monthTotals} prevTotals={prevTotals}
+            selectedMonth={selectedMonth} prevMonthKey={prevMonthKey}
+            monthRows={monthRows} monthPayments={monthPayments}
+            unpaidCount={unpaidCount} pctChange={pctChange}
+            monthCategoryTotals={monthCategoryTotals} setTab={setTab}
+          />
+        )}
+
+        {tab === "sales" && (
+          <SalesTab
+            cOpen={cOpen} setCOpen={setCOpen} cForm={cForm} setCForm={setCForm}
+            cEditing={cEditing} saveClient={saveClient} cancelClient={cancelClient}
+            knownSalespeople={knownSalespeople}
+            previewBalance={previewBalance} previewProfit={previewProfit} showPreview={showPreview}
+            search={search} setSearch={setSearch}
+            filter={filter} setFilter={setFilter}
+            monthRows={monthRows} unpaidCount={unpaidCount}
+            visibleRows={visibleRows} selectedMonth={selectedMonth}
+            togglePaid={togglePaid}
+            setViewingClient={setViewingClient}
+            monthTotals={monthTotals}
+          />
+        )}
+
+        {tab === "clients" && (
+          <ClientsDB
+            clients={allClientsSearch}
+            search={clientSearch} setSearch={setClientSearch}
+            onView={setViewingClient}
+            onAdd={() => { setCEditing(null); setCForm({ ...EMPTY_CLIENT, id: uid(), photos: [] }); setCOpen(true); setTab("sales"); }}
+            allCount={clients.length}
+          />
+        )}
+
+        {tab === "categories" && (
+          <CategoriesTab monthRows={monthRows} selectedMonth={selectedMonth} monthCategoryTotals={monthCategoryTotals} monthTotals={monthTotals} />
+        )}
+
+        {tab === "staff" && (
+          <StaffTab
+            staffMonthBreakdown={staffMonthBreakdown}
+            staff={staff} payments={payments}
+            stOpen={stOpen} setStOpen={setStOpen} stForm={stForm} setStForm={setStForm}
+            stEditing={stEditing} saveStaff={saveStaff} cancelStaff={cancelStaff}
+            pOpen={pOpen} setPOpen={setPOpen} pForm={pForm} setPForm={setPForm}
+            pEditing={pEditing} savePayment={savePayment} cancelPayment={cancelPayment}
+            selectedMonth={selectedMonth} monthTotals={monthTotals}
+            setViewingStaff={setViewingStaff}
+            payRemainingSalary={payRemainingSalary}
+            giveAdvance={giveAdvance}
+          />
+        )}
+      </div>
+
+      <div style={{
+        position: "fixed", bottom: 0, left: 0, right: 0,
+        background: "rgba(15,23,42,0.95)", backdropFilter: "blur(8px)",
+        padding: "10px 20px", textAlign: "center",
+        fontSize: 11, color: "#475569", fontFamily: "sans-serif", letterSpacing: 1,
+      }}>
+        🪟 {user.shopName.toUpperCase()} · Logged in as {user.email}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── STAFF DETAIL MODAL ────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+function StaffDetailModal({ staff, breakdown, payments, currentMonth, onClose, onEdit, onDelete, onGiveAdvance, onPayRemaining, onEditPayment, onDeletePayment, onToggleActive }) {
+  const remaining = breakdown?.remaining ?? 0;
+  const monthlySalary = breakdown?.monthlySalary ?? 0;
+  const advances = breakdown?.advances ?? 0;
+  const salaryPaid = breakdown?.salaryPaid ?? 0;
+  const totalPaid = breakdown?.totalPaid ?? 0;
+
+  const pctPaid = monthlySalary > 0 ? Math.min(100, (totalPaid / monthlySalary) * 100) : 0;
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
+      zIndex: 250, overflowY: "auto", padding: 12,
+      display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 30,
+    }} onClick={onClose}>
+      <div style={{
+        background: "#fff", borderRadius: 14, width: "100%", maxWidth: 480,
+        boxShadow: "0 20px 60px rgba(0,0,0,0.4)", overflow: "hidden", marginBottom: 30,
+      }} onClick={e => e.stopPropagation()}>
+
+        <div style={{
+          background: staff.active ? "linear-gradient(135deg, #ec4899 0%, #4f46e5 100%)" : "linear-gradient(135deg, #64748b 0%, #475569 100%)",
+          color: "#fff", padding: "20px",
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", opacity: 0.7, fontFamily: "sans-serif", marginBottom: 4 }}>Staff Profile</div>
+              <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: -0.5, marginBottom: 4 }}>{staff.name}</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {staff.role && <span style={{ background: "rgba(255,255,255,0.2)", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontFamily: "sans-serif", fontWeight: 600 }}>{staff.role}</span>}
+                {staff.active ? (
+                  <span style={{ background: "#10b981", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontFamily: "sans-serif", fontWeight: 700 }}>● Active</span>
+                ) : (
+                  <span style={{ background: "rgba(255,255,255,0.25)", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontFamily: "sans-serif", fontWeight: 700 }}>Inactive</span>
+                )}
+              </div>
+            </div>
+            <button onClick={onClose} style={{
+              background: "rgba(255,255,255,0.15)", border: "none", color: "#fff",
+              width: 32, height: 32, borderRadius: "50%", fontSize: 14, cursor: "pointer", flexShrink: 0,
+            }}>✕</button>
+          </div>
+        </div>
+
+        <div style={{ padding: "20px" }}>
+          {/* Salary breakdown for current month */}
+          <Section title={`💰 ${formatMonthKey(currentMonth)} Salary`}>
+            {monthlySalary === 0 ? (
+              <div style={{
+                background: "#fef3c7", border: "1.5px solid #fde68a",
+                borderRadius: 10, padding: "12px", fontSize: 13, color: "#92400e",
+                textAlign: "center", fontFamily: "sans-serif",
+              }}>
+                ⚠️ No monthly salary set. Tap "Edit" below to set one.
+              </div>
+            ) : (
+              <>
+                <div style={{
+                  background: "#0f172a", color: "#fff", borderRadius: 12, padding: "16px",
+                  marginBottom: 10,
+                }}>
+                  <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", color: "#94a3b8", fontFamily: "sans-serif", marginBottom: 4 }}>Monthly Salary</div>
+                  <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 12 }}>{fmt(monthlySalary)}</div>
+
+                  {/* Progress bar */}
+                  <div style={{ height: 10, background: "rgba(255,255,255,0.1)", borderRadius: 99, overflow: "hidden", marginBottom: 4 }}>
+                    <div style={{ height: "100%", width: `${pctPaid}%`, background: pctPaid >= 100 ? "#10b981" : "#a855f7", transition: "width 0.4s", borderRadius: 99 }} />
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#94a3b8", fontFamily: "sans-serif" }}>
+                    <span>Paid: {fmt(totalPaid)}</span>
+                    <span>{pctPaid.toFixed(0)}%</span>
+                  </div>
+                </div>
+
+                {/* Breakdown rows */}
+                <div style={{ background: "#fff", borderRadius: 10, border: "1.5px solid #e2e8f0", overflow: "hidden", marginBottom: 10 }}>
+                  <BreakRow label="Monthly Salary" value={fmt(monthlySalary)} color="#0f172a" />
+                  <BreakRow label={`Advances Taken (${payments.filter(p => p.type === "Advance" && monthKey(p.date) === currentMonth).length})`} value={`-${fmt(advances)}`} color="#be185d" sub />
+                  <BreakRow label={`Salary Paid Out (${payments.filter(p => p.type === "Salary" && monthKey(p.date) === currentMonth).length})`} value={`-${fmt(salaryPaid)}`} color="#7c3aed" sub />
+                  <BreakRow label="Remaining to Pay" value={fmt(remaining)} color={remaining > 0 ? "#10b981" : remaining === 0 ? "#64748b" : "#ef4444"} bold />
+                </div>
+
+                {/* Quick actions */}
+                {staff.active && (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                    {remaining > 0 && (
+                      <button onClick={() => onPayRemaining(remaining)} style={{
+                        gridColumn: "1 / -1",
+                        background: "#10b981", color: "#fff", border: "none",
+                        borderRadius: 10, padding: "12px", fontSize: 14, fontWeight: 700,
+                        cursor: "pointer", fontFamily: "Georgia, serif",
+                      }}>💰 Pay Remaining {fmt(remaining)}</button>
+                    )}
+                    <button onClick={onGiveAdvance} style={{
+                      background: "#ec4899", color: "#fff", border: "none",
+                      borderRadius: 10, padding: "12px", fontSize: 13, fontWeight: 700,
+                      cursor: "pointer", fontFamily: "Georgia, serif",
+                    }}>⏩ Give Advance</button>
+                    <button onClick={() => onPayRemaining(monthlySalary - totalPaid)} disabled={remaining <= 0} style={{
+                      background: "#fff", color: remaining > 0 ? "#7c3aed" : "#cbd5e1",
+                      border: `1.5px solid ${remaining > 0 ? "#7c3aed" : "#e2e8f0"}`,
+                      borderRadius: 10, padding: "11px", fontSize: 13, fontWeight: 700,
+                      cursor: remaining > 0 ? "pointer" : "not-allowed", fontFamily: "Georgia, serif",
+                    }}>💵 Salary Payment</button>
+                  </div>
+                )}
+              </>
+            )}
+          </Section>
+
+          {/* Payment history */}
+          <Section title={`📋 Payment History (${payments.length})`}>
+            {payments.length === 0 ? (
+              <div style={{ textAlign: "center", padding: "20px", color: "#94a3b8", fontSize: 13, fontFamily: "sans-serif", border: "1.5px dashed #e2e8f0", borderRadius: 10 }}>
+                No payments yet for this staff member.
+              </div>
+            ) : (
+              <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 10, overflow: "hidden" }}>
+                {payments.map((p, i) => (
+                  <div key={p.id} style={{
+                    padding: "10px 12px",
+                    borderTop: i > 0 ? "1px solid #f1f5f9" : "none",
+                    display: "flex", alignItems: "center", gap: 10,
+                  }}>
+                    <span style={{
+                      background: p.type === "Salary" ? "#ede9fe" : "#fce7f3",
+                      color: p.type === "Salary" ? "#7c3aed" : "#be185d",
+                      borderRadius: 20, padding: "2px 9px", fontSize: 10, fontWeight: 700, fontFamily: "sans-serif",
+                      flexShrink: 0,
+                    }}>{p.type === "Salary" ? "💰" : "⏩"} {p.type}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: "#0f172a" }}>{fmt(p.amount)}</div>
+                      <div style={{ fontSize: 11, color: "#94a3b8", fontFamily: "sans-serif" }}>
+                        {p.date}{p.note ? ` · ${p.note}` : ""}
+                      </div>
+                    </div>
+                    <button onClick={() => onEditPayment(p)} style={{ background: "none", border: "none", color: "#6366f1", cursor: "pointer", fontSize: 13, padding: 3 }}>✏️</button>
+                    <button onClick={() => { if (window.confirm("Delete this payment?")) onDeletePayment(p.id); }} style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: 13, padding: 3 }}>🗑</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Section>
+
+          {/* Staff details */}
+          <Section title="📇 Staff Info">
+            <DetailRow label="Role" value={staff.role} />
+            <DetailRow label="Joined" value={staff.joinDate} />
+            <DetailRow label="Status" value={staff.active ? "Active" : "Inactive"} />
+          </Section>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <button onClick={onToggleActive} style={{
+              gridColumn: "1 / -1",
+              background: staff.active ? "#fff7ed" : "#d1fae5",
+              color: staff.active ? "#9a3412" : "#065f46",
+              border: `1.5px solid ${staff.active ? "#fed7aa" : "#a7f3d0"}`,
+              borderRadius: 10, padding: "11px", fontSize: 13, fontWeight: 700,
+              cursor: "pointer", fontFamily: "Georgia, serif",
+            }}>{staff.active ? "🚫 Mark Inactive" : "✓ Mark Active"}</button>
+            <button onClick={onEdit} style={{
+              background: "#6366f1", color: "#fff", border: "none",
+              borderRadius: 10, padding: "12px", fontSize: 13, fontWeight: 700,
+              cursor: "pointer", fontFamily: "Georgia, serif",
+            }}>✏️ Edit Staff</button>
+            <button onClick={onDelete} style={{
+              background: "#fff", color: "#ef4444", border: "1.5px solid #fca5a5",
+              borderRadius: 10, padding: "12px", fontSize: 13, fontWeight: 700,
+              cursor: "pointer", fontFamily: "Georgia, serif",
+            }}>🗑 Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BreakRow({ label, value, color, sub, bold }) {
+  return (
+    <div style={{
+      display: "flex", justifyContent: "space-between",
+      padding: "9px 14px", fontSize: 13,
+      borderTop: sub ? "1px solid #f1f5f9" : "none",
+      background: bold ? "#f8fafc" : "transparent",
+    }}>
+      <div style={{ color: "#475569", fontFamily: "sans-serif", fontWeight: bold ? 700 : 500 }}>{label}</div>
+      <div style={{ color: color || "#0f172a", fontWeight: bold ? 800 : 700 }}>{value}</div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── STAFF TAB (NEW STRUCTURE) ────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+function StaffTab({
+  staffMonthBreakdown, staff, payments,
+  stOpen, setStOpen, stForm, setStForm, stEditing, saveStaff, cancelStaff,
+  pOpen, setPOpen, pForm, setPForm, pEditing, savePayment, cancelPayment,
+  selectedMonth, monthTotals, setViewingStaff, payRemainingSalary, giveAdvance,
+}) {
+  const totalSalaryBudget = staffMonthBreakdown.filter(s => s.active).reduce((a, s) => a + s.monthlySalary, 0);
+  const totalRemaining = staffMonthBreakdown.filter(s => s.active).reduce((a, s) => a + Math.max(0, s.remaining), 0);
+
+  return (
+    <div>
+      {/* SUMMARY BANNER */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
+        <div style={{ background: "#ede9fe", borderRadius: 10, padding: "12px 14px" }}>
+          <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", color: "#7c3aed", opacity: 0.7, fontFamily: "sans-serif" }}>Monthly Budget</div>
+          <div style={{ fontSize: 17, fontWeight: 800, color: "#7c3aed", marginTop: 2 }}>{fmt(totalSalaryBudget)}</div>
+          <div style={{ fontSize: 10, color: "#7c3aed", fontFamily: "sans-serif" }}>{staffMonthBreakdown.filter(s => s.active).length} active staff</div>
+        </div>
+        <div style={{ background: "#fce7f3", borderRadius: 10, padding: "12px 14px" }}>
+          <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", color: "#be185d", opacity: 0.7, fontFamily: "sans-serif" }}>Paid This Month</div>
+          <div style={{ fontSize: 17, fontWeight: 800, color: "#be185d", marginTop: 2 }}>{fmt(monthTotals.staffTotal)}</div>
+          <div style={{ fontSize: 10, color: "#be185d", fontFamily: "sans-serif" }}>{fmt(totalRemaining)} remaining</div>
+        </div>
+      </div>
+
+      {/* ACTION BUTTONS */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
+        <button onClick={() => { setStForm({ ...EMPTY_STAFF, id: uid() }); setStOpen(true); }} style={{
+          background: "#6366f1", color: "#fff", border: "none",
+          borderRadius: 10, padding: "12px", fontSize: 14, fontWeight: 700,
+          cursor: "pointer", fontFamily: "Georgia, serif",
+        }}>＋ Add Staff Member</button>
+        <button onClick={() => { setPForm({ ...EMPTY_PAYMENT, id: uid() }); setPOpen(true); }} disabled={staff.length === 0} style={{
+          background: staff.length > 0 ? "#ec4899" : "#cbd5e1",
+          color: "#fff", border: "none",
+          borderRadius: 10, padding: "12px", fontSize: 14, fontWeight: 700,
+          cursor: staff.length > 0 ? "pointer" : "not-allowed", fontFamily: "Georgia, serif",
+        }}>💵 Record Payment</button>
+      </div>
+
+      {/* STAFF FORM */}
+      {stOpen && (
+        <div style={{
+          background: "#fff", borderRadius: 12, padding: "18px",
+          marginBottom: 16, boxShadow: "0 2px 12px rgba(15,23,42,0.1)",
+          borderLeft: "4px solid #6366f1",
+        }}>
+          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 14, color: "#0f172a" }}>
+            {stEditing ? "✏️ Edit Staff Member" : "➕ Add Staff Member"}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+            <Field label="Full Name" span={2}>
+              <TInput value={stForm.name} onChange={v => setStForm(f => ({ ...f, name: v }))} placeholder="e.g. Hassan Mohamed" />
+            </Field>
+            <Field label="Role / Position">
+              <TInput value={stForm.role} onChange={v => setStForm(f => ({ ...f, role: v }))} placeholder="e.g. Salesperson" />
+            </Field>
+            <Field label="Joined Date">
+              <TInput type="date" value={stForm.joinDate} onChange={v => setStForm(f => ({ ...f, joinDate: v }))} />
+            </Field>
+            <Field label="Monthly Salary (KSh)" span={2}>
+              <TInput type="number" value={stForm.monthlySalary} onChange={v => setStForm(f => ({ ...f, monthlySalary: v }))} placeholder="e.g. 25000" />
+            </Field>
+          </div>
+          <label style={{
+            display: "flex", alignItems: "center", gap: 12, padding: "10px 12px",
+            background: stForm.active ? "#d1fae5" : "#f8fafc",
+            border: `1.5px solid ${stForm.active ? "#10b981" : "#e2e8f0"}`,
+            borderRadius: 10, cursor: "pointer", marginBottom: 14,
+          }}>
+            <PaidToggle checked={stForm.active} onToggle={() => setStForm(f => ({ ...f, active: !f.active }))} size="md" />
+            <div style={{ fontSize: 13, fontWeight: 600, color: stForm.active ? "#065f46" : "#0f172a", fontFamily: "sans-serif" }}>
+              {stForm.active ? "Active staff member" : "Inactive (won't count in budget)"}
+            </div>
+          </label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={saveStaff} style={{
+              flex: 1, background: "#6366f1", color: "#fff", border: "none",
+              borderRadius: 8, padding: "11px", fontSize: 14, fontWeight: 700,
+              cursor: "pointer", fontFamily: "Georgia, serif",
+            }}>{stEditing ? "Update" : "Add Staff"}</button>
+            <button onClick={cancelStaff} style={{
+              padding: "11px 18px", border: "1.5px solid #e2e8f0", borderRadius: 8,
+              background: "#fff", color: "#64748b", fontSize: 14, cursor: "pointer",
+              fontFamily: "Georgia, serif",
+            }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* PAYMENT FORM */}
+      {pOpen && (
+        <div style={{
+          background: "#fff", borderRadius: 12, padding: "18px",
+          marginBottom: 16, boxShadow: "0 2px 12px rgba(15,23,42,0.1)",
+          borderLeft: "4px solid #ec4899",
+        }}>
+          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 14, color: "#0f172a" }}>
+            {pEditing ? "✏️ Edit Payment" : "➕ Record Payment"}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+            <Field label="Staff Member" span={2}>
+              <TSelect value={pForm.staffId} onChange={v => setPForm(f => ({ ...f, staffId: v }))}>
+                <option value="">Select staff...</option>
+                {staff.map(s => <option key={s.id} value={s.id}>{s.name}{s.role ? ` (${s.role})` : ""}</option>)}
+              </TSelect>
+            </Field>
+            <Field label="Type">
+              <TSelect value={pForm.type} onChange={v => setPForm(f => ({ ...f, type: v }))}>
+                <option>Salary</option>
+                <option>Advance</option>
+              </TSelect>
+            </Field>
+            <Field label="Amount (KSh)">
+              <TInput type="number" value={pForm.amount} onChange={v => setPForm(f => ({ ...f, amount: v }))} placeholder="0" />
+            </Field>
+            <Field label="Date" span={2}>
+              <TInput type="date" value={pForm.date} onChange={v => setPForm(f => ({ ...f, date: v }))} />
+            </Field>
+            <Field label="Note" span={2}>
+              <TInput value={pForm.note} onChange={v => setPForm(f => ({ ...f, note: v }))} placeholder="Optional" />
+            </Field>
+          </div>
+
+          {/* Show remaining for selected staff */}
+          {pForm.staffId && (() => {
+            const sb = staffMonthBreakdown.find(s => s.id === pForm.staffId);
+            if (!sb || sb.monthlySalary === 0) return null;
+            return (
+              <div style={{
+                background: "#f8fafc", border: "1px solid #e2e8f0",
+                borderRadius: 8, padding: "10px 12px", marginBottom: 12,
+                fontSize: 12, color: "#475569", fontFamily: "sans-serif",
+              }}>
+                <strong>{sb.name}</strong>'s salary: {fmt(sb.monthlySalary)} ·
+                Already taken: {fmt(sb.totalPaid)} ·
+                <strong style={{ color: sb.remaining > 0 ? "#10b981" : "#ef4444" }}> Remaining: {fmt(sb.remaining)}</strong>
+              </div>
+            );
+          })()}
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={savePayment} style={{
+              flex: 1, background: "#ec4899", color: "#fff", border: "none",
+              borderRadius: 8, padding: "11px", fontSize: 14, fontWeight: 700,
+              cursor: "pointer", fontFamily: "Georgia, serif",
+            }}>{pEditing ? "Update" : "Save Payment"}</button>
+            <button onClick={cancelPayment} style={{
+              padding: "11px 18px", border: "1.5px solid #e2e8f0", borderRadius: 8,
+              background: "#fff", color: "#64748b", fontSize: 14, cursor: "pointer",
+              fontFamily: "Georgia, serif",
+            }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* STAFF LIST */}
+      {staff.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "50px 20px", color: "#94a3b8", background: "#fff", borderRadius: 12, border: "1.5px dashed #e2e8f0" }}>
+          <div style={{ fontSize: 36, marginBottom: 10 }}>👥</div>
+          <div>No staff yet. Tap <strong>+ Add Staff Member</strong> to begin.</div>
+        </div>
+      ) : (
+        <div style={{ background: "#fff", borderRadius: 12, overflow: "hidden", boxShadow: "0 2px 8px rgba(15,23,42,0.06)" }}>
+          {staffMonthBreakdown.map((s, i) => {
+            const pctPaid = s.monthlySalary > 0 ? Math.min(100, (s.totalPaid / s.monthlySalary) * 100) : 0;
+            return (
+              <button key={s.id} onClick={() => setViewingStaff(s)} style={{
+                width: "100%", textAlign: "left", background: "transparent",
+                border: "none", borderTop: i > 0 ? "1px solid #f1f5f9" : "none",
+                padding: "14px 16px", cursor: "pointer", fontFamily: "Georgia, serif",
+                opacity: s.active ? 1 : 0.55,
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+                  <div style={{
+                    width: 42, height: 42, borderRadius: 10,
+                    background: s.active ? "linear-gradient(135deg, #ec4899, #6366f1)" : "#cbd5e1",
+                    color: "#fff", display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 15, fontWeight: 800, fontFamily: "sans-serif", flexShrink: 0,
+                  }}>{(s.name || "?").slice(0, 1).toUpperCase()}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 15, color: "#0f172a" }}>{s.name}</div>
+                    <div style={{ fontSize: 12, color: "#94a3b8", fontFamily: "sans-serif" }}>
+                      {s.role || "Staff"} · Salary: <strong style={{ color: "#6366f1" }}>{fmt(s.monthlySalary)}</strong>
+                    </div>
+                  </div>
+                  <div style={{ textAlign: "right", flexShrink: 0 }}>
+                    <div style={{ fontSize: 11, color: "#94a3b8", fontFamily: "sans-serif" }}>Remaining</div>
+                    <div style={{
+                      fontSize: 15, fontWeight: 800,
+                      color: s.remaining > 0 ? "#10b981" : s.remaining === 0 ? "#64748b" : "#ef4444"
+                    }}>{fmt(s.remaining)}</div>
+                  </div>
+                </div>
+
+                {/* Progress bar */}
+                {s.monthlySalary > 0 && (
+                  <div style={{ marginBottom: 4 }}>
+                    <div style={{ height: 6, background: "#f1f5f9", borderRadius: 99, overflow: "hidden" }}>
+                      <div style={{
+                        height: "100%",
+                        width: `${pctPaid}%`,
+                        background: pctPaid >= 100 ? "#10b981" : "#a855f7",
+                        borderRadius: 99, transition: "width 0.3s",
+                      }} />
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#94a3b8", fontFamily: "sans-serif", marginTop: 3 }}>
+                      <span>💰 Paid: {fmt(s.salaryPaid)} · ⏩ Adv: {fmt(s.advances)}</span>
+                      <span>{pctPaid.toFixed(0)}% of salary</span>
+                    </div>
+                  </div>
+                )}
+                {s.monthlySalary === 0 && (
+                  <div style={{ fontSize: 11, color: "#92400e", background: "#fef3c7", borderRadius: 6, padding: "4px 8px", fontFamily: "sans-serif", display: "inline-block" }}>
+                    ⚠️ Set monthly salary
+                  </div>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── CLIENT DETAIL MODAL ──────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+function ClientDetailModal({ client, onClose, onEdit, onDelete, onReorder }) {
+  const [previewPhoto, setPreviewPhoto] = useState(null);
+  const fullyPaid = client.paid || (num(client.sales) > 0 && client.balance <= 0);
+  const photos = client.photos || [];
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
+      zIndex: 250, overflowY: "auto", padding: 12,
+      display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 30,
+    }} onClick={onClose}>
+      <div style={{
+        background: "#fff", borderRadius: 14, width: "100%", maxWidth: 480,
+        boxShadow: "0 20px 60px rgba(0,0,0,0.4)", overflow: "hidden", marginBottom: 30,
+      }} onClick={e => e.stopPropagation()}>
+
+        <div style={{
+          background: `linear-gradient(135deg, ${CAT_COLORS[client.category] || "#6366f1"} 0%, #1e3a5f 100%)`,
+          color: "#fff", padding: "20px",
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", opacity: 0.7, fontFamily: "sans-serif", marginBottom: 4 }}>Client Profile</div>
+              <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: -0.5, marginBottom: 4 }}>{client.client}</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <span style={{ background: "rgba(255,255,255,0.2)", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontFamily: "sans-serif", fontWeight: 600 }}>{client.category}</span>
+                {photos.length > 0 && <span style={{ background: "rgba(255,255,255,0.2)", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontFamily: "sans-serif", fontWeight: 600 }}>📸 {photos.length}</span>}
+                {fullyPaid ? (
+                  <span style={{ background: "#10b981", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontFamily: "sans-serif", fontWeight: 700 }}>✓ Paid</span>
+                ) : client.balance > 0 ? (
+                  <span style={{ background: "#f59e0b", borderRadius: 20, padding: "2px 10px", fontSize: 11, fontFamily: "sans-serif", fontWeight: 700 }}>⏳ Owes {fmt(client.balance)}</span>
+                ) : null}
+              </div>
+            </div>
+            <button onClick={onClose} style={{
+              background: "rgba(255,255,255,0.15)", border: "none", color: "#fff",
+              width: 32, height: 32, borderRadius: "50%", fontSize: 14, cursor: "pointer", flexShrink: 0,
+            }}>✕</button>
+          </div>
+        </div>
+
+        <div style={{ padding: "20px" }}>
+          {photos.length > 0 && (
+            <Section title={`📸 Photos (${photos.length})`}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 8 }}>
+                {photos.map(photo => (
+                  <button key={photo.id} onClick={() => setPreviewPhoto(photo)} style={{
+                    padding: 0, border: "none", background: "none",
+                    borderRadius: 10, overflow: "hidden", cursor: "pointer",
+                    boxShadow: "0 2px 8px rgba(15,23,42,0.12)", position: "relative",
+                  }}>
+                    <img src={photo.dataUrl} alt={photo.caption || ""} style={{
+                      width: "100%", height: 100, objectFit: "cover", display: "block",
+                    }} />
+                    {photo.caption && (
+                      <div style={{
+                        position: "absolute", bottom: 0, left: 0, right: 0,
+                        background: "linear-gradient(to top, rgba(0,0,0,0.85), transparent)",
+                        color: "#fff", padding: "12px 6px 4px",
+                        fontSize: 10, fontFamily: "sans-serif",
+                        textAlign: "left", fontWeight: 600,
+                        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                      }}>{photo.caption}</div>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </Section>
+          )}
+
+          <Section title="📇 Contact Info">
+            <DetailRow label="Phone" value={client.phone} clickable={client.phone ? `tel:${client.phone.replace(/\s/g, '')}` : null} />
+            <DetailRow label="Email" value={client.email} clickable={client.email ? `mailto:${client.email}` : null} />
+            <DetailRow label="Location" value={client.location} />
+          </Section>
+
+          <Section title="🛒 Order Details">
+            <DetailRow label="Date" value={client.date} />
+            <DetailRow label="Salesperson" value={client.salesperson} />
+            <DetailRow label="Category" value={client.category} />
+          </Section>
+
+          {(client.measurements || client.productDetails) && (
+            <Section title="📏 Measurements & Product">
+              {client.measurements && (
+                <div style={{ background: "#fffbeb", border: "1.5px solid #fde68a", borderRadius: 10, padding: "12px", marginBottom: 8 }}>
+                  <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", color: "#92400e", fontFamily: "sans-serif", fontWeight: 700, marginBottom: 5 }}>📐 Measurements</div>
+                  <div style={{ fontSize: 14, color: "#451a03", whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{client.measurements}</div>
+                </div>
+              )}
+              {client.productDetails && (
+                <div style={{ background: "#eff6ff", border: "1.5px solid #bfdbfe", borderRadius: 10, padding: "12px" }}>
+                  <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", color: "#1e40af", fontFamily: "sans-serif", fontWeight: 700, marginBottom: 5 }}>🎨 Product Details</div>
+                  <div style={{ fontSize: 14, color: "#1e3a8a", whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{client.productDetails}</div>
+                </div>
+              )}
+            </Section>
+          )}
+
+          <Section title="💰 Money">
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <MoneyBox label="Sales" value={fmt(client.sales)} color="#6366f1" />
+              <MoneyBox label="Deposit" value={fmt(client.deposit)} color="#10b981" />
+              <MoneyBox label="Balance" value={fmt(client.balance)} color={client.balance > 0 ? "#f59e0b" : "#10b981"} />
+              <MoneyBox label="Profit" value={fmt(client.profit)} color={client.profit >= 0 ? "#10b981" : "#ef4444"} />
+              <MoneyBox label="Cost" value={fmt(client.cost)} color="#ef4444" />
+              <MoneyBox label="Transport" value={fmt(client.transport)} color="#f59e0b" />
+              <div style={{ gridColumn: "1 / -1" }}>
+                <MoneyBox label="Allowance" value={fmt(client.allowance)} color="#a855f7" />
+              </div>
+            </div>
+          </Section>
+
+          {client.note && (
+            <Section title="📝 Note">
+              <div style={{ background: "#f8fafc", border: "1.5px solid #e2e8f0", borderRadius: 10, padding: "12px", fontSize: 14, color: "#475569", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{client.note}</div>
+            </Section>
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
+            <button onClick={onReorder} style={{
+              gridColumn: "1 / -1",
+              background: "#10b981", color: "#fff", border: "none",
+              borderRadius: 10, padding: "13px", fontSize: 14, fontWeight: 700,
+              cursor: "pointer", fontFamily: "Georgia, serif",
+            }}>🔁 Repeat Order</button>
+            <button onClick={onEdit} style={{
+              background: "#6366f1", color: "#fff", border: "none",
+              borderRadius: 10, padding: "12px", fontSize: 13,
+              fontWeight: 700, cursor: "pointer", fontFamily: "Georgia, serif",
+            }}>✏️ Edit</button>
+            <button onClick={onDelete} style={{
+              background: "#fff", color: "#ef4444", border: "1.5px solid #fca5a5",
+              borderRadius: 10, padding: "12px", fontSize: 13,
+              fontWeight: 700, cursor: "pointer", fontFamily: "Georgia, serif",
+            }}>🗑 Delete</button>
+          </div>
+        </div>
+      </div>
+
+      {previewPhoto && <PhotoPreview photo={previewPhoto} onClose={() => setPreviewPhoto(null)} />}
+    </div>
+  );
+}
+
+function Section({ title, children }) {
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div style={{ fontSize: 11, letterSpacing: 1.5, textTransform: "uppercase", color: "#475569", fontFamily: "sans-serif", fontWeight: 700, marginBottom: 8 }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+function DetailRow({ label, value, clickable }) {
+  if (!value) {
+    return (
+      <div style={{ display: "flex", padding: "7px 0", borderBottom: "1px dashed #f1f5f9", fontSize: 13 }}>
+        <div style={{ flex: 1, color: "#94a3b8", fontFamily: "sans-serif" }}>{label}</div>
+        <div style={{ color: "#cbd5e1", fontStyle: "italic" }}>—</div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", padding: "7px 0", borderBottom: "1px dashed #f1f5f9", fontSize: 13 }}>
+      <div style={{ flex: 1, color: "#94a3b8", fontFamily: "sans-serif" }}>{label}</div>
+      {clickable ? (
+        <a href={clickable} style={{ color: "#6366f1", fontWeight: 600, textDecoration: "none" }}>{value}</a>
+      ) : (
+        <div style={{ color: "#0f172a", fontWeight: 600, textAlign: "right" }}>{value}</div>
+      )}
+    </div>
+  );
+}
+
+function MoneyBox({ label, value, color }) {
+  return (
+    <div style={{ background: "#f8fafc", borderRadius: 8, padding: "10px 8px", textAlign: "center" }}>
+      <div style={{ fontSize: 9, letterSpacing: 1, textTransform: "uppercase", color: "#94a3b8", fontFamily: "sans-serif" }}>{label}</div>
+      <div style={{ fontSize: 14, fontWeight: 800, color, marginTop: 3 }}>{value}</div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+function ClientsDB({ clients, search, setSearch, onView, onAdd, allCount }) {
+  return (
+    <div>
+      <div style={{
+        background: "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)",
+        color: "#fff", borderRadius: 14, padding: "18px",
+        marginBottom: 14, boxShadow: "0 6px 20px rgba(99,102,241,0.35)",
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", opacity: 0.7, fontFamily: "sans-serif" }}>Client Database</div>
+            <div style={{ fontSize: 22, fontWeight: 800, marginTop: 2 }}>{allCount} {allCount === 1 ? "Client" : "Clients"}</div>
+          </div>
+          <div style={{ fontSize: 32 }}>👤</div>
+        </div>
+      </div>
+
+      <button onClick={onAdd} style={{
+        width: "100%", background: "#10b981", color: "#fff",
+        border: "none", borderRadius: 10, padding: "12px",
+        fontSize: 14, fontWeight: 700, cursor: "pointer",
+        fontFamily: "Georgia, serif", marginBottom: 14,
+      }}>＋ Add New Client</button>
+
+      <div style={{
+        background: "#fff", borderRadius: 12, padding: "12px 14px",
+        marginBottom: 12, boxShadow: "0 2px 8px rgba(15,23,42,0.06)",
+      }}>
+        <input value={search} onChange={e => setSearch(e.target.value)}
+          placeholder="🔍 Search name, phone, location, salesperson…"
+          style={{
+            width: "100%", border: "1.5px solid #e2e8f0", borderRadius: 8,
+            padding: "10px 12px", fontSize: 14, fontFamily: "Georgia, serif",
+            background: "#f8fafc", boxSizing: "border-box", outline: "none",
+          }} />
+      </div>
+
+      {clients.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "50px 20px", color: "#94a3b8", background: "#fff", borderRadius: 12, border: "1.5px dashed #e2e8f0" }}>
+          <div style={{ fontSize: 36, marginBottom: 10 }}>👤</div>
+          <div>{search.trim() ? "No matches." : "No clients yet."}</div>
+        </div>
+      ) : (
+        <div style={{ background: "#fff", borderRadius: 12, overflow: "hidden", boxShadow: "0 2px 8px rgba(15,23,42,0.06)" }}>
+          {clients.map((c, i) => {
+            const fullyPaid = c.paid || (num(c.sales) > 0 && c.balance <= 0);
+            const photos = c.photos || [];
+            return (
+              <button key={c.id} onClick={() => onView(c)} style={{
+                width: "100%", textAlign: "left", background: "transparent",
+                border: "none", borderTop: i > 0 ? "1px solid #f1f5f9" : "none",
+                borderLeft: `3px solid ${CAT_COLORS[c.category] || "#94a3b8"}`,
+                padding: "14px 14px", cursor: "pointer", fontFamily: "Georgia, serif",
+                display: "flex", gap: 12, alignItems: "flex-start",
+              }}>
+                {photos.length > 0 ? (
+                  <div style={{ position: "relative", flexShrink: 0 }}>
+                    <img src={photos[0].dataUrl} alt="" style={{ width: 60, height: 60, borderRadius: 10, objectFit: "cover", display: "block" }} />
+                    {photos.length > 1 && (
+                      <div style={{
+                        position: "absolute", top: -4, right: -4,
+                        background: "#0f172a", color: "#fff",
+                        fontSize: 10, fontWeight: 700, fontFamily: "sans-serif",
+                        borderRadius: 10, padding: "2px 6px", border: "2px solid #fff",
+                      }}>+{photos.length - 1}</div>
+                    )}
+                  </div>
+                ) : (
+                  <div style={{
+                    width: 60, height: 60, borderRadius: 10,
+                    background: (CAT_COLORS[c.category] || "#94a3b8") + "20",
+                    color: CAT_COLORS[c.category] || "#94a3b8",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 22, fontFamily: "sans-serif", fontWeight: 800, flexShrink: 0,
+                  }}>{c.client.slice(0, 1).toUpperCase()}</div>
+                )}
+
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 3 }}>
+                    <div style={{ fontWeight: 700, fontSize: 15, color: "#0f172a" }}>{c.client}</div>
+                    <div style={{ fontSize: 11, color: "#94a3b8", fontFamily: "sans-serif", flexShrink: 0, marginLeft: 8 }}>{c.date}</div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 4 }}>
+                    <span style={{
+                      background: (CAT_COLORS[c.category] || "#94a3b8") + "20",
+                      color: CAT_COLORS[c.category] || "#94a3b8",
+                      borderRadius: 20, padding: "1px 8px",
+                      fontSize: 11, fontFamily: "sans-serif", fontWeight: 600,
+                    }}>{c.category}</span>
+                    {c.salesperson && <span style={{ fontSize: 11, color: "#6366f1", fontFamily: "sans-serif", fontWeight: 600 }}>🧑‍💼 {c.salesperson}</span>}
+                    {fullyPaid ? (
+                      <span style={{ background: "#d1fae5", color: "#065f46", borderRadius: 20, padding: "1px 8px", fontSize: 10, fontFamily: "sans-serif", fontWeight: 700 }}>✓ Paid</span>
+                    ) : c.balance > 0 ? (
+                      <span style={{ background: "#fef3c7", color: "#92400e", borderRadius: 20, padding: "1px 8px", fontSize: 10, fontFamily: "sans-serif", fontWeight: 700 }}>⏳ {fmt(c.balance)}</span>
+                    ) : null}
+                  </div>
+                  <div style={{ display: "flex", gap: 10, fontSize: 12, color: "#64748b", fontFamily: "sans-serif", flexWrap: "wrap" }}>
+                    {c.phone && <span>📞 {c.phone}</span>}
+                    {c.location && <span>📍 {c.location}</span>}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#94a3b8", fontFamily: "sans-serif", marginTop: 4, display: "flex", justifyContent: "space-between" }}>
+                    <span>Sales: <strong style={{ color: "#6366f1" }}>{fmt(c.sales)}</strong></span>
+                    <span style={{ color: "#6366f1", fontWeight: 700 }}>View →</span>
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+function SalesTab(props) {
+  const {
+    cOpen, setCOpen, cForm, setCForm, cEditing, saveClient, cancelClient,
+    knownSalespeople,
+    previewBalance, previewProfit, showPreview,
+    search, setSearch, filter, setFilter,
+    monthRows, unpaidCount, visibleRows, selectedMonth,
+    togglePaid, setViewingClient, monthTotals,
+  } = props;
+
+  return (
+    <div>
+      {!cOpen && (
+        <button onClick={() => { setCForm({ ...EMPTY_CLIENT, id: uid(), photos: [] }); setCOpen(true); }}
+          style={{
+            width: "100%", background: "#6366f1", color: "#fff",
+            border: "none", borderRadius: 10, padding: "13px",
+            fontSize: 15, fontWeight: 700, cursor: "pointer",
+            fontFamily: "Georgia, serif", marginBottom: 14,
+          }}>＋ Add Client Entry</button>
+      )}
+
+      {cOpen && (
+        <div style={{
+          background: "#fff", borderRadius: 12, padding: "18px",
+          marginBottom: 16, boxShadow: "0 2px 12px rgba(15,23,42,0.1)",
+          borderLeft: "4px solid #6366f1",
+        }}>
+          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 14, color: "#0f172a" }}>
+            {cEditing ? "✏️ Edit Entry" : "➕ New Client Entry"}
+          </div>
+
+          <FormSection title="① Client Info" color="#6366f1">
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <Field label="Client Name" span={2}><TInput value={cForm.client} onChange={v => setCForm(f => ({ ...f, client: v }))} placeholder="e.g. Wanjiku Njoroge" /></Field>
+              <Field label="Phone Number"><TInput type="tel" value={cForm.phone} onChange={v => setCForm(f => ({ ...f, phone: v }))} placeholder="0712 345 678" /></Field>
+              <Field label="Email"><TInput type="email" value={cForm.email} onChange={v => setCForm(f => ({ ...f, email: v }))} placeholder="optional" /></Field>
+              <Field label="Location / Address" span={2}><TInput value={cForm.location} onChange={v => setCForm(f => ({ ...f, location: v }))} placeholder="e.g. Karen, Nairobi" /></Field>
+              <Field label="Category"><TSelect value={cForm.category} onChange={v => setCForm(f => ({ ...f, category: v }))}>{CATEGORIES.map(c => <option key={c}>{c}</option>)}</TSelect></Field>
+              <Field label="Date"><TInput type="date" value={cForm.date} onChange={v => setCForm(f => ({ ...f, date: v }))} /></Field>
+              <Field label="Salesperson" span={2}>
+                <TInput value={cForm.salesperson} onChange={v => setCForm(f => ({ ...f, salesperson: v }))} placeholder="e.g. Hassan" />
+                {knownSalespeople.length > 0 && !cForm.salesperson && (
+                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
+                    {knownSalespeople.map(sp => (
+                      <button key={sp} onClick={() => setCForm(f => ({ ...f, salesperson: sp }))} style={{
+                        fontSize: 11, padding: "3px 10px", borderRadius: 14,
+                        border: "1.5px solid #e2e8f0", background: "#fff",
+                        color: "#6366f1", cursor: "pointer", fontFamily: "Georgia, serif",
+                      }}>+ {sp}</button>
+                    ))}
+                  </div>
+                )}
+              </Field>
+            </div>
+          </FormSection>
+
+          <FormSection title="② Photos" color="#ec4899">
+            <div style={{ fontSize: 12, color: "#64748b", fontFamily: "sans-serif", marginBottom: 10 }}>
+              Photos of fabric, samples, or finished installation.
+            </div>
+            <PhotoUploader photos={cForm.photos || []} onChange={(newPhotos) => setCForm(f => ({ ...f, photos: newPhotos }))} />
+          </FormSection>
+
+          <FormSection title="③ Measurements & Product" color="#f59e0b">
+            <Field label="Measurements">
+              <TArea value={cForm.measurements} onChange={v => setCForm(f => ({ ...f, measurements: v }))} rows={3} placeholder="e.g.&#10;Living room: 2.4m × 1.8m&#10;Master bedroom: 1.5m × 2.0m" />
+            </Field>
+            <div style={{ height: 10 }} />
+            <Field label="Product Details">
+              <TArea value={cForm.productDetails} onChange={v => setCForm(f => ({ ...f, productDetails: v }))} rows={2} placeholder="e.g. Beige velvet blackout, double rod" />
+            </Field>
+          </FormSection>
+
+          <FormSection title="④ Money In" color="#10b981">
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <Field label="Sales (KSh)"><TInput type="number" value={cForm.sales} onChange={v => setCForm(f => ({ ...f, sales: v }))} placeholder="0" /></Field>
+              <Field label="Deposit (KSh)"><TInput type="number" value={cForm.deposit} onChange={v => setCForm(f => ({ ...f, deposit: v }))} placeholder="0" /></Field>
+            </div>
+          </FormSection>
+
+          <FormSection title="⑤ Costs" color="#ef4444">
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <Field label="Cost (KSh)"><TInput type="number" value={cForm.cost} onChange={v => setCForm(f => ({ ...f, cost: v }))} placeholder="0" /></Field>
+              <Field label="Transport (KSh)"><TInput type="number" value={cForm.transport} onChange={v => setCForm(f => ({ ...f, transport: v }))} placeholder="0" /></Field>
+              <Field label="Allowance (KSh)" span={2}><TInput type="number" value={cForm.allowance} onChange={v => setCForm(f => ({ ...f, allowance: v }))} placeholder="0" /></Field>
+            </div>
+          </FormSection>
+
+          <FormSection title="⑥ Notes" color="#64748b">
+            <Field label="Note (optional)"><TInput value={cForm.note} onChange={v => setCForm(f => ({ ...f, note: v }))} placeholder="Any remarks" /></Field>
+          </FormSection>
+
+          <label style={{
+            display: "flex", alignItems: "center", gap: 12, padding: "12px 14px",
+            background: cForm.paid ? "#d1fae5" : "#f8fafc",
+            border: `1.5px solid ${cForm.paid ? "#10b981" : "#e2e8f0"}`,
+            borderRadius: 10, cursor: "pointer", marginBottom: 14,
+          }}>
+            <PaidToggle checked={cForm.paid} onToggle={() => setCForm(f => ({ ...f, paid: !f.paid }))} size="lg" />
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 14, color: cForm.paid ? "#065f46" : "#0f172a" }}>Mark as Fully Paid</div>
+              <div style={{ fontSize: 12, color: cForm.paid ? "#059669" : "#64748b", fontFamily: "sans-serif" }}>{cForm.paid ? "All payments received" : "Tick once balance is settled"}</div>
+            </div>
+          </label>
+
+          {showPreview && (
+            <div style={{
+              background: "#0f172a", borderRadius: 10, padding: "12px 14px", marginBottom: 14,
+              display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8,
+            }}>
+              <div>
+                <div style={{ fontSize: 9, letterSpacing: 1.5, textTransform: "uppercase", color: "#475569", fontFamily: "sans-serif" }}>Balance Due</div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: previewBalance > 0 ? "#fcd34d" : "#6ee7b7", marginTop: 2 }}>{fmt(previewBalance)}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 9, letterSpacing: 1.5, textTransform: "uppercase", color: "#475569", fontFamily: "sans-serif" }}>Profit</div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: previewProfit >= 0 ? "#6ee7b7" : "#fca5a5", marginTop: 2 }}>{fmt(previewProfit)}</div>
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={saveClient} style={{
+              flex: 1, background: "#6366f1", color: "#fff", border: "none",
+              borderRadius: 8, padding: "11px", fontSize: 14, fontWeight: 700,
+              cursor: "pointer", fontFamily: "Georgia, serif",
+            }}>{cEditing ? "Update Entry" : "Save Entry"}</button>
+            <button onClick={cancelClient} style={{
+              padding: "11px 18px", border: "1.5px solid #e2e8f0", borderRadius: 8,
+              background: "#fff", color: "#64748b", fontSize: 14, cursor: "pointer",
+              fontFamily: "Georgia, serif",
+            }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {monthRows.length > 0 && !cOpen && (
+        <div style={{
+          background: "#fff", borderRadius: 12, padding: "12px 14px",
+          marginBottom: 12, boxShadow: "0 2px 8px rgba(15,23,42,0.06)",
+        }}>
+          <input value={search} onChange={e => setSearch(e.target.value)}
+            placeholder="🔍 Search name, phone, location, salesperson…"
+            style={{
+              width: "100%", border: "1.5px solid #e2e8f0", borderRadius: 8,
+              padding: "9px 12px", fontSize: 14, fontFamily: "Georgia, serif",
+              background: "#f8fafc", boxSizing: "border-box", outline: "none", marginBottom: 10,
+            }} />
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {[
+              { key: "all", label: `All (${monthRows.length})` },
+              { key: "unpaid", label: `Unpaid (${unpaidCount})` },
+              { key: "paid", label: `Paid (${monthRows.length - unpaidCount})` },
+            ].map(f => (
+              <button key={f.key} onClick={() => setFilter(f.key)} style={{
+                padding: "5px 11px", borderRadius: 16, border: "1.5px solid",
+                borderColor: filter === f.key ? "#6366f1" : "#e2e8f0",
+                background: filter === f.key ? "#6366f1" : "#fff",
+                color: filter === f.key ? "#fff" : "#64748b",
+                fontSize: 12, cursor: "pointer", fontFamily: "Georgia, serif",
+              }}>{f.label}</button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {monthRows.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "50px 20px", color: "#94a3b8", background: "#fff", borderRadius: 12, border: "1.5px dashed #e2e8f0" }}>
+          <div style={{ fontSize: 36, marginBottom: 10 }}>📋</div>
+          <div>No entries for {formatMonthKey(selectedMonth)}.</div>
+        </div>
+      ) : visibleRows.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "30px 20px", color: "#94a3b8", background: "#fff", borderRadius: 12, border: "1.5px dashed #e2e8f0" }}>No matches.</div>
+      ) : (
+        <div style={{
+          background: "#fff", borderRadius: 12, overflow: "hidden",
+          boxShadow: "0 2px 8px rgba(15,23,42,0.06)", marginBottom: 14,
+        }}>
+          {visibleRows.map((r, idx) => {
+            const fullyPaid = r.paid || (num(r.sales) > 0 && r.balance <= 0);
+            const photos = r.photos || [];
+            return (
+              <div key={r.id} style={{
+                borderTop: idx > 0 ? "1px solid #f1f5f9" : "none",
+                padding: "14px 14px 12px",
+                borderLeft: `3px solid ${CAT_COLORS[r.category] || "#94a3b8"}`,
+                opacity: fullyPaid ? 0.92 : 1,
+              }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 8 }}>
+                  <PaidToggle checked={fullyPaid} onToggle={() => togglePaid(r.id)} size="lg" />
+                  <button onClick={() => setViewingClient(r)} style={{
+                    flex: 1, minWidth: 0, background: "transparent", border: "none",
+                    textAlign: "left", padding: 0, cursor: "pointer", fontFamily: "Georgia, serif",
+                  }}>
+                    <div style={{
+                      fontWeight: 700, fontSize: 15, color: "#0f172a",
+                      textDecoration: fullyPaid ? "line-through" : "none",
+                      textDecorationColor: "#94a3b8",
+                    }}>{r.client}</div>
+                    <div style={{ display: "flex", gap: 6, marginTop: 3, flexWrap: "wrap", alignItems: "center" }}>
+                      <span style={{
+                        background: (CAT_COLORS[r.category] || "#94a3b8") + "20",
+                        color: CAT_COLORS[r.category] || "#94a3b8",
+                        borderRadius: 20, padding: "1px 8px",
+                        fontSize: 11, fontFamily: "sans-serif", fontWeight: 600,
+                      }}>{r.category}</span>
+                      {r.salesperson && <span style={{ fontSize: 11, color: "#6366f1", fontFamily: "sans-serif", fontWeight: 600 }}>🧑‍💼 {r.salesperson}</span>}
+                      {photos.length > 0 && <span style={{ fontSize: 11, color: "#ec4899", fontFamily: "sans-serif", fontWeight: 600 }}>📸 {photos.length}</span>}
+                      {fullyPaid ? (
+                        <span style={{ background: "#d1fae5", color: "#065f46", borderRadius: 20, padding: "1px 8px", fontSize: 11, fontFamily: "sans-serif", fontWeight: 700 }}>✓ Paid</span>
+                      ) : r.balance > 0 ? (
+                        <span style={{ background: "#fef3c7", color: "#92400e", borderRadius: 20, padding: "1px 8px", fontSize: 11, fontFamily: "sans-serif", fontWeight: 700 }}>⏳ {fmt(r.balance)}</span>
+                      ) : null}
+                    </div>
+                  </button>
+                  {photos.length > 0 && (
+                    <button onClick={() => setViewingClient(r)} style={{ padding: 0, border: "none", background: "none", cursor: "pointer", flexShrink: 0 }}>
+                      <img src={photos[0].dataUrl} alt="" style={{ width: 44, height: 44, borderRadius: 8, objectFit: "cover", display: "block", boxShadow: "0 1px 3px rgba(0,0,0,0.15)" }} />
+                    </button>
+                  )}
+                </div>
+
+                <div style={{
+                  display: "flex", justifyContent: "space-between", gap: 3,
+                  background: "#f8fafc", borderRadius: 8, padding: "8px 8px",
+                  fontFamily: "sans-serif",
+                }}>
+                  {[
+                    { label: "Sales", value: fmtShort(r.sales), color: "#6366f1" },
+                    { label: "Deposit", value: fmtShort(r.deposit), color: "#10b981" },
+                    { label: "Balance", value: fmtShort(r.balance), color: r.balance > 0 && !r.paid ? "#f59e0b" : "#10b981" },
+                    { label: "Cost", value: fmtShort(r.cost), color: "#ef4444" },
+                    { label: "Transp", value: fmtShort(r.transport), color: "#f59e0b" },
+                    { label: "Allow", value: fmtShort(r.allowance), color: "#a855f7" },
+                    { label: "Profit", value: fmtShort(r.profit), color: r.profit >= 0 ? "#10b981" : "#ef4444" },
+                  ].map(m => (
+                    <div key={m.label} style={{ flex: 1, textAlign: "center", minWidth: 0 }}>
+                      <div style={{ fontSize: 8, letterSpacing: 0.5, textTransform: "uppercase", color: "#94a3b8" }}>{m.label}</div>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: m.color, marginTop: 1 }}>{m.value}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+
+          <div style={{
+            background: "#0f172a", color: "#fff",
+            padding: "14px", borderTop: "2px solid #1e3a5f",
+          }}>
+            <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: "#475569", fontFamily: "sans-serif", marginBottom: 8, fontWeight: 700 }}>
+              Month Total — {monthTotals.count} entries
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 4, fontFamily: "sans-serif" }}>
+              {[
+                { label: "Sales", value: fmtShort(monthTotals.sales), color: "#a5b4fc" },
+                { label: "Cost", value: fmtShort(monthTotals.cost), color: "#fca5a5" },
+                { label: "Transp", value: fmtShort(monthTotals.transport), color: "#fcd34d" },
+                { label: "Allow", value: fmtShort(monthTotals.allowance), color: "#d8b4fe" },
+                { label: "Profit", value: fmtShort(monthTotals.profit), color: monthTotals.profit >= 0 ? "#6ee7b7" : "#fca5a5" },
+              ].map(m => (
+                <div key={m.label} style={{ flex: 1, textAlign: "center", minWidth: 0 }}>
+                  <div style={{ fontSize: 9, letterSpacing: 1, textTransform: "uppercase", color: "#475569" }}>{m.label}</div>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: m.color, marginTop: 2 }}>{m.value}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FormSection({ title, color, children }) {
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", color, fontFamily: "sans-serif", marginBottom: 8, fontWeight: 700 }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+function MonthlySummary({ monthTotals, prevTotals, selectedMonth, prevMonthKey, monthRows, monthPayments, unpaidCount, pctChange, monthCategoryTotals, setTab }) {
+  return (
+    <div>
+      <div style={{
+        background: "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)",
+        color: "#fff", borderRadius: 14, padding: "20px",
+        marginBottom: 14, boxShadow: "0 6px 20px rgba(99,102,241,0.35)",
+      }}>
+        <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", opacity: 0.7, fontFamily: "sans-serif", marginBottom: 4 }}>{formatMonthKey(selectedMonth)} Summary</div>
+        <div style={{ fontSize: 28, fontWeight: 800, letterSpacing: -1, marginBottom: 2 }}>{fmt(monthTotals.net)}</div>
+        <div style={{ fontSize: 12, opacity: 0.85, fontFamily: "sans-serif" }}>Net profit after {monthTotals.count} sale{monthTotals.count !== 1 ? "s" : ""} & all costs</div>
+        {prevTotals.count > 0 && (
+          <div style={{ marginTop: 14, padding: "10px 12px", background: "rgba(255,255,255,0.12)", borderRadius: 10 }}>
+            <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", opacity: 0.7, fontFamily: "sans-serif", marginBottom: 4 }}>vs {formatMonthKeyShort(prevMonthKey)}</div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, fontFamily: "sans-serif" }}>
+              <span>Last month: {fmt(prevTotals.net)}</span>
+              {(() => {
+                const change = pctChange(monthTotals.net, prevTotals.net);
+                if (change === null) return null;
+                const up = change >= 0;
+                return <span style={{ fontWeight: 700, color: up ? "#86efac" : "#fca5a5" }}>{up ? "▲" : "▼"} {Math.abs(change).toFixed(1)}%</span>;
+              })()}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
+        <div style={{ background: "#fff", borderRadius: 12, padding: "14px", borderTop: "4px solid #6366f1", boxShadow: "0 2px 8px rgba(15,23,42,0.06)" }}>
+          <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", color: "#94a3b8", fontFamily: "sans-serif" }}>💼 Total Sales</div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: "#6366f1", marginTop: 4 }}>{fmt(monthTotals.sales)}</div>
+        </div>
+        <div style={{ background: "#fff", borderRadius: 12, padding: "14px", borderTop: "4px solid #ef4444", boxShadow: "0 2px 8px rgba(15,23,42,0.06)" }}>
+          <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", color: "#94a3b8", fontFamily: "sans-serif" }}>💸 Money Out</div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: "#ef4444", marginTop: 4 }}>{fmt(monthTotals.cost + monthTotals.transport + monthTotals.allowance + monthTotals.staffTotal)}</div>
+        </div>
+      </div>
+
+      <div style={{ background: "#fff", borderRadius: 12, overflow: "hidden", marginBottom: 14, boxShadow: "0 2px 8px rgba(15,23,42,0.06)" }}>
+        <div style={{ background: "#0f172a", color: "#fff", padding: "12px 16px" }}>
+          <div style={{ fontSize: 13, fontWeight: 800 }}>📋 Full Month Breakdown</div>
+          <div style={{ fontSize: 11, color: "#94a3b8", fontFamily: "sans-serif", marginTop: 1 }}>{formatMonthKey(selectedMonth)}</div>
+        </div>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+          <tbody>
+            {[
+              { section: "Income" },
+              { label: "Total Sales", value: monthTotals.sales, color: "#6366f1", strong: true },
+              { label: "Number of Clients", value: monthTotals.count, raw: true, color: "#0f172a" },
+              { section: "Costs" },
+              { label: "Product Cost", value: monthTotals.cost, color: "#ef4444", neg: true },
+              { label: "Transport", value: monthTotals.transport, color: "#f59e0b", neg: true },
+              { label: "Allowance", value: monthTotals.allowance, color: "#a855f7", neg: true },
+              { section: "Profit" },
+              { label: "Gross Profit", value: monthTotals.profit, color: monthTotals.profit >= 0 ? "#10b981" : "#ef4444", strong: true },
+              { section: "Staff" },
+              { label: "Salaries Paid", value: monthTotals.salTotal, color: "#7c3aed", neg: true },
+              { label: "Advances Given", value: monthTotals.advTotal, color: "#be185d", neg: true },
+              { section: "Bottom Line" },
+              { label: "NET PROFIT", value: monthTotals.net, color: monthTotals.net >= 0 ? "#10b981" : "#ef4444", strong: true, big: true },
+            ].map((row, i) => {
+              if (row.section) {
+                return (
+                  <tr key={i}>
+                    <td colSpan={2} style={{
+                      padding: "10px 16px", background: "#f8fafc",
+                      fontSize: 10, letterSpacing: 2, textTransform: "uppercase",
+                      color: "#94a3b8", fontFamily: "sans-serif", fontWeight: 700,
+                      borderTop: i > 0 ? "1px solid #e2e8f0" : "none",
+                    }}>{row.section}</td>
+                  </tr>
+                );
+              }
+              return (
+                <tr key={i} style={{ borderTop: "1px solid #f1f5f9" }}>
+                  <td style={{ padding: "11px 16px", color: "#475569", fontFamily: "sans-serif", fontSize: 13 }}>{row.label}</td>
+                  <td style={{
+                    padding: "11px 16px", textAlign: "right",
+                    color: row.color || "#0f172a",
+                    fontWeight: row.strong ? 800 : 600,
+                    fontSize: row.big ? 17 : 14,
+                  }}>{row.neg && row.value > 0 ? "-" : ""}{row.raw ? row.value : fmt(row.value)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {monthTotals.balance > 0 && (
+        <div style={{
+          background: "#fff7ed", border: "1.5px solid #fed7aa",
+          borderRadius: 12, padding: "14px 16px", marginBottom: 14,
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", color: "#9a3412", fontFamily: "sans-serif", fontWeight: 700 }}>⏳ Outstanding (not in totals)</div>
+              <div style={{ fontSize: 12, color: "#9a3412", fontFamily: "sans-serif", marginTop: 2 }}>{unpaidCount} client{unpaidCount !== 1 ? "s" : ""} owe money</div>
+            </div>
+            <div style={{ fontSize: 20, fontWeight: 800, color: "#c2410c" }}>{fmt(monthTotals.balance)}</div>
+          </div>
+        </div>
+      )}
+
+      {monthRows.length === 0 && monthPayments.length === 0 && (
+        <div style={{ textAlign: "center", padding: "40px 20px", color: "#94a3b8", background: "#fff", borderRadius: 12, border: "1.5px dashed #e2e8f0" }}>
+          <div style={{ fontSize: 36, marginBottom: 10 }}>📅</div>
+          <div>No data for {formatMonthKey(selectedMonth)} yet.</div>
+          <button onClick={() => setTab("sales")} style={{
+            marginTop: 14, background: "#6366f1", color: "#fff", border: "none",
+            borderRadius: 8, padding: "9px 18px", fontSize: 13, cursor: "pointer", fontFamily: "Georgia, serif",
+          }}>Add an entry</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+function CategoriesTab({ monthRows, selectedMonth, monthCategoryTotals, monthTotals }) {
+  if (monthRows.length === 0) {
+    return (
+      <div style={{ textAlign: "center", padding: "50px 20px", color: "#94a3b8", background: "#fff", borderRadius: 12, border: "1.5px dashed #e2e8f0" }}>
+        <div style={{ fontSize: 36, marginBottom: 10 }}>📊</div>
+        <div>No data for {formatMonthKey(selectedMonth)}.</div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ background: "#fff", borderRadius: 12, overflow: "hidden", boxShadow: "0 2px 8px rgba(15,23,42,0.06)" }}>
+      <div style={{ background: "#0f172a", color: "#fff", padding: "12px 16px" }}>
+        <div style={{ fontSize: 13, fontWeight: 800 }}>📊 Category Performance</div>
+        <div style={{ fontSize: 11, color: "#94a3b8", fontFamily: "sans-serif", marginTop: 1 }}>{formatMonthKey(selectedMonth)}</div>
+      </div>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+        <thead>
+          <tr style={{ background: "#f8fafc" }}>
+            <th style={{ padding: "10px 12px", textAlign: "left", fontSize: 9, letterSpacing: 1, textTransform: "uppercase", color: "#94a3b8", fontFamily: "sans-serif" }}>Category</th>
+            <th style={{ padding: "10px 8px", textAlign: "right", fontSize: 9, letterSpacing: 1, textTransform: "uppercase", color: "#94a3b8", fontFamily: "sans-serif" }}>Sales</th>
+            <th style={{ padding: "10px 8px", textAlign: "right", fontSize: 9, letterSpacing: 1, textTransform: "uppercase", color: "#94a3b8", fontFamily: "sans-serif" }}>Costs</th>
+            <th style={{ padding: "10px 12px", textAlign: "right", fontSize: 9, letterSpacing: 1, textTransform: "uppercase", color: "#94a3b8", fontFamily: "sans-serif" }}>Profit</th>
+          </tr>
+        </thead>
+        <tbody>
+          {CATEGORIES.filter(c => monthCategoryTotals[c]?.count > 0).map(cat => {
+            const t = monthCategoryTotals[cat];
+            const margin = t.sales ? ((t.profit / t.sales) * 100).toFixed(0) : 0;
+            return (
+              <tr key={cat} style={{ borderTop: "1px solid #f1f5f9" }}>
+                <td style={{ padding: "12px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 10, height: 10, borderRadius: 3, background: CAT_COLORS[cat] }}></span>
+                    <div>
+                      <div style={{ fontWeight: 700, color: "#0f172a", fontSize: 13 }}>{cat}</div>
+                      <div style={{ fontSize: 10, color: "#94a3b8", fontFamily: "sans-serif" }}>{t.count} client{t.count !== 1 ? "s" : ""} · {margin}%</div>
+                    </div>
+                  </div>
+                </td>
+                <td style={{ padding: "12px 8px", textAlign: "right", color: "#6366f1", fontWeight: 700 }}>{fmtShort(t.sales)}</td>
+                <td style={{ padding: "12px 8px", textAlign: "right", color: "#ef4444", fontWeight: 700 }}>{fmtShort(t.cost + t.transport + t.allowance)}</td>
+                <td style={{ padding: "12px", textAlign: "right", color: t.profit >= 0 ? "#10b981" : "#ef4444", fontWeight: 800 }}>{fmtShort(t.profit)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+        <tfoot>
+          <tr style={{ background: "#0f172a", color: "#fff" }}>
+            <td style={{ padding: "12px", fontWeight: 800, fontSize: 12, letterSpacing: 1 }}>TOTAL</td>
+            <td style={{ padding: "12px 8px", textAlign: "right", fontWeight: 800, color: "#a5b4fc" }}>{fmtShort(monthTotals.sales)}</td>
+            <td style={{ padding: "12px 8px", textAlign: "right", fontWeight: 800, color: "#fca5a5" }}>{fmtShort(monthTotals.cost + monthTotals.transport + monthTotals.allowance)}</td>
+            <td style={{ padding: "12px", textAlign: "right", fontWeight: 800, color: monthTotals.profit >= 0 ? "#6ee7b7" : "#fca5a5" }}>{fmtShort(monthTotals.profit)}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  );
+}
+
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+
+</body>
+</html>
