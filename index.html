@@ -29,6 +29,46 @@
 
 <script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
 
+<!-- Firebase SDK (compat version for browser/CDN use) -->
+
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
+
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-auth-compat.js"></script>
+
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"></script>
+
+<script>
+  // ── Firebase Initialization ─────────────────────────────────────────────────
+  (function() {
+    try {
+      const firebaseConfig = {
+        apiKey: "AIzaSyAcQVDayMtzFpER5GoLSDPM1DBsjFTPwU0",
+        authDomain: "wemo-curtains.firebaseapp.com",
+        projectId: "wemo-curtains",
+        storageBucket: "wemo-curtains.firebasestorage.app",
+        messagingSenderId: "1032475542459",
+        appId: "1:1032475542459:web:90a4e74a90ed2a82e63a9e",
+        measurementId: "G-M6SYK0YHXJ"
+      };
+      if (typeof firebase === "undefined") {
+        console.error("Firebase SDK failed to load");
+        window.fbReady = false;
+        return;
+      }
+      firebase.initializeApp(firebaseConfig);
+      window.fbAuth = firebase.auth();
+      window.fbDB = firebase.firestore();
+      window.fbReady = true;
+      // Enable offline support so the app works without internet
+      try { window.fbDB.enablePersistence({ synchronizeTabs: true }); } catch (e) {}
+    } catch (e) {
+      console.error("Firebase init failed:", e);
+      window.fbReady = false;
+      window.fbInitError = e.message || String(e);
+    }
+  })();
+</script>
+
 <script type="text/babel" data-presets="react">
 const { useState, useMemo, useEffect, useRef } = React;
 
@@ -96,81 +136,95 @@ function compressImage(file, maxWidth = 1000, quality = 0.75) {
   });
 }
 
-// ── Auth Storage ──────────────────────────────────────────────────────────────
-const AUTH_KEYS = { users: "wemo_users", session: "wemo_session" };
+// ── Firebase Auth & Data Layer ────────────────────────────────────────────────
+// All data is stored in Firestore so it syncs across phone & MacBook automatically.
+// Structure: users/{uid} = { shopName, email, createdAt }
+//            users/{uid}/clients/{clientId}, users/{uid}/staff/{staffId}, users/{uid}/payments/{paymentId}
 
-function loadUsers() {
-  try { const r = localStorage.getItem(AUTH_KEYS.users); return r ? JSON.parse(r) : []; }
-  catch { return []; }
-}
-function saveUsers(users) {
-  try { localStorage.setItem(AUTH_KEYS.users, JSON.stringify(users)); } catch {}
-}
-function getSession() {
-  try { return localStorage.getItem(AUTH_KEYS.session); } catch { return null; }
-}
-function setSession(email) {
-  try { localStorage.setItem(AUTH_KEYS.session, email); } catch {}
-}
-function clearSession() {
-  try { localStorage.removeItem(AUTH_KEYS.session); } catch {}
-}
-
-function userClientsKey(email) { return `wemo_clients__${email}`; }
-function userStaffKey(email) { return `wemo_staff__${email}`; }
-function userPaymentsKey(email) { return `wemo_payments__${email}`; }
-
-function loadUserData(email) {
-  if (!email) return { clients: [], staff: [], payments: [] };
-  try {
-    const c = localStorage.getItem(userClientsKey(email));
-    const st = localStorage.getItem(userStaffKey(email));
-    const p = localStorage.getItem(userPaymentsKey(email));
-    // Try migrating from old salaries key
-    const oldSal = localStorage.getItem(`wemo_salaries__${email}`);
-    let migratedStaff = [];
-    let migratedPayments = [];
-    if (!st && oldSal) {
-      const oldData = JSON.parse(oldSal);
-      const nameMap = {};
-      oldData.forEach(s => {
-        if (!nameMap[s.name]) {
-          const sId = uid();
-          nameMap[s.name] = sId;
-          migratedStaff.push({
-            id: sId, name: s.name, role: "",
-            monthlySalary: "", joinDate: s.date || todayISO(), active: true,
-          });
-        }
-        migratedPayments.push({
-          id: uid(), staffId: nameMap[s.name],
-          type: s.type, amount: s.amount, date: s.date, note: s.note || "",
-        });
-      });
-    }
-    return {
-      clients: c ? JSON.parse(c) : [],
-      staff: st ? JSON.parse(st) : migratedStaff,
-      payments: p ? JSON.parse(p) : migratedPayments,
-    };
-  } catch { return { clients: [], staff: [], payments: [] }; }
-}
-function saveUserClients(email, data) {
-  if (!email) return;
-  try { localStorage.setItem(userClientsKey(email), JSON.stringify(data)); }
-  catch (e) {
-    if (e.name === "QuotaExceededError") {
-      alert("⚠️ Phone storage is getting full. Try removing some photos from older entries.");
-    }
+// Login with Firebase Auth (email + password)
+async function fbLogin(email, password) {
+  const cred = await window.fbAuth.signInWithEmailAndPassword(email.trim().toLowerCase(), password);
+  const userDoc = await window.fbDB.collection("users").doc(cred.user.uid).get();
+  if (userDoc.exists) {
+    return { uid: cred.user.uid, email: cred.user.email, ...userDoc.data() };
   }
+  // Fallback if user profile missing (shouldn't normally happen)
+  return { uid: cred.user.uid, email: cred.user.email, shopName: "My Shop" };
 }
-function saveUserStaff(email, data) {
-  if (!email) return;
-  try { localStorage.setItem(userStaffKey(email), JSON.stringify(data)); } catch {}
+
+// Sign up: create Firebase Auth account + write user profile doc
+async function fbSignup(email, password, shopName) {
+  const cred = await window.fbAuth.createUserWithEmailAndPassword(email.trim().toLowerCase(), password);
+  const profile = {
+    email: cred.user.email,
+    shopName: shopName.trim(),
+    createdAt: new Date().toISOString(),
+  };
+  await window.fbDB.collection("users").doc(cred.user.uid).set(profile);
+  return { uid: cred.user.uid, ...profile };
 }
-function saveUserPayments(email, data) {
-  if (!email) return;
-  try { localStorage.setItem(userPaymentsKey(email), JSON.stringify(data)); } catch {}
+
+// Sign out
+async function fbLogout() {
+  try { await window.fbAuth.signOut(); } catch (e) {}
+}
+
+// Subscribe to real-time data updates for a user. Returns an unsubscribe function.
+function subscribeUserData(uid, onData) {
+  if (!uid) return () => {};
+  let clients = [], staff = [], payments = [];
+  let ready = { c: false, s: false, p: false };
+  const tryEmit = () => {
+    if (ready.c && ready.s && ready.p) onData({ clients, staff, payments });
+  };
+  const userRef = window.fbDB.collection("users").doc(uid);
+  const unsubC = userRef.collection("clients").onSnapshot(snap => {
+    clients = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    ready.c = true; tryEmit();
+  });
+  const unsubS = userRef.collection("staff").onSnapshot(snap => {
+    staff = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    ready.s = true; tryEmit();
+  });
+  const unsubP = userRef.collection("payments").onSnapshot(snap => {
+    payments = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    ready.p = true; tryEmit();
+  });
+  return () => { unsubC(); unsubS(); unsubP(); };
+}
+
+// Save a single client (create or update). The doc id is the client's id field.
+async function fbSaveClient(uid, client) {
+  if (!uid || !client?.id) return;
+  const { id, ...data } = client;
+  await window.fbDB.collection("users").doc(uid).collection("clients").doc(id).set(data);
+}
+// Delete a client
+async function fbDeleteClient(uid, clientId) {
+  if (!uid || !clientId) return;
+  await window.fbDB.collection("users").doc(uid).collection("clients").doc(clientId).delete();
+}
+
+// Save a single staff member
+async function fbSaveStaff(uid, s) {
+  if (!uid || !s?.id) return;
+  const { id, ...data } = s;
+  await window.fbDB.collection("users").doc(uid).collection("staff").doc(id).set(data);
+}
+async function fbDeleteStaff(uid, staffId) {
+  if (!uid || !staffId) return;
+  await window.fbDB.collection("users").doc(uid).collection("staff").doc(staffId).delete();
+}
+
+// Save a single payment
+async function fbSavePayment(uid, p) {
+  if (!uid || !p?.id) return;
+  const { id, ...data } = p;
+  await window.fbDB.collection("users").doc(uid).collection("payments").doc(id).set(data);
+}
+async function fbDeletePayment(uid, paymentId) {
+  if (!uid || !paymentId) return;
+  await window.fbDB.collection("users").doc(uid).collection("payments").doc(paymentId).delete();
 }
 
 function monthKey(dateStr) {
@@ -366,31 +420,58 @@ function AuthScreen({ onLogin }) {
   const [shopName, setShopName] = useState("");
   const [error, setError] = useState("");
 
-  const handleLogin = () => {
+  const [busy, setBusy] = useState(false);
+
+  const handleLogin = async () => {
     setError("");
     if (!email.trim() || !password) { setError("Please enter email and password."); return; }
-    const users = loadUsers();
-    const user = users.find(u => u.email.toLowerCase() === email.trim().toLowerCase());
-    if (!user) { setError("No account found. Try creating a profile."); return; }
-    if (user.password !== password) { setError("Wrong password."); return; }
-    setSession(user.email);
-    onLogin(user);
+    setBusy(true);
+    try {
+      const user = await fbLogin(email, password);
+      onLogin(user);
+    } catch (err) {
+      const code = err.code || "";
+      if (code === "auth/user-not-found" || code === "auth/invalid-credential" || code === "auth/invalid-login-credentials") {
+        setError("No account found, or wrong password.");
+      } else if (code === "auth/wrong-password") {
+        setError("Wrong password.");
+      } else if (code === "auth/invalid-email") {
+        setError("That doesn't look like a valid email.");
+      } else if (code === "auth/network-request-failed") {
+        setError("No internet connection. Check your data and try again.");
+      } else {
+        setError(err.message || "Login failed. Try again.");
+      }
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const handleSignup = () => {
+  const handleSignup = async () => {
     setError("");
     if (!email.trim() || !password || !shopName.trim()) { setError("Please fill in all fields."); return; }
-    if (password.length < 4) { setError("Password must be at least 4 characters."); return; }
+    if (password.length < 6) { setError("Password must be at least 6 characters."); return; }
     if (password !== confirmPassword) { setError("Passwords don't match."); return; }
-    const users = loadUsers();
-    if (users.find(u => u.email.toLowerCase() === email.trim().toLowerCase())) {
-      setError("Account already exists. Login instead."); return;
+    setBusy(true);
+    try {
+      const newUser = await fbSignup(email, password, shopName);
+      onLogin(newUser);
+    } catch (err) {
+      const code = err.code || "";
+      if (code === "auth/email-already-in-use") {
+        setError("Account already exists. Try logging in instead.");
+      } else if (code === "auth/invalid-email") {
+        setError("That doesn't look like a valid email.");
+      } else if (code === "auth/weak-password") {
+        setError("Password is too weak. Use at least 6 characters.");
+      } else if (code === "auth/network-request-failed") {
+        setError("No internet connection. Check your data and try again.");
+      } else {
+        setError(err.message || "Sign-up failed. Try again.");
+      }
+    } finally {
+      setBusy(false);
     }
-    const newUser = { email: email.trim().toLowerCase(), password, shopName: shopName.trim(), createdAt: new Date().toISOString() };
-    users.push(newUser);
-    saveUsers(users);
-    setSession(newUser.email);
-    onLogin(newUser);
   };
 
   const containerStyle = {
@@ -402,7 +483,7 @@ function AuthScreen({ onLogin }) {
   const cardStyle = { background: "#fff", borderRadius: 18, padding: "32px 26px", width: "100%", maxWidth: 380, boxShadow: "0 20px 60px rgba(0,0,0,0.35)" };
 
   if (mode === "welcome") {
-    const userCount = loadUsers().length;
+    const userCount = 0; // Firebase mode: we don't pre-check; users login or signup directly
     return (
       <div style={containerStyle}>
         <div style={cardStyle}>
@@ -430,7 +511,7 @@ function AuthScreen({ onLogin }) {
             fontFamily: "Georgia, serif",
           }}>➕ Create new profile</button>
           <div style={{ marginTop: 22, padding: "10px 12px", background: "#fef3c7", borderRadius: 8, fontSize: 11, color: "#92400e", fontFamily: "sans-serif", textAlign: "center", lineHeight: 1.5 }}>
-            🔒 Demo mode. Firebase will sync across phone & MacBook.
+            ☁️ Cloud sync active. Your data syncs across all your devices.
           </div>
         </div>
       </div>
@@ -493,13 +574,22 @@ function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const sessionEmail = getSession();
-    if (sessionEmail) {
-      const users = loadUsers();
-      const user = users.find(u => u.email === sessionEmail);
-      if (user) setCurrentUser(user); else clearSession();
-    }
-    setLoading(false);
+    // Firebase tracks login state automatically; restore session on page load.
+    const unsub = window.fbAuth.onAuthStateChanged(async (fbUser) => {
+      if (fbUser) {
+        try {
+          const doc = await window.fbDB.collection("users").doc(fbUser.uid).get();
+          const profile = doc.exists ? doc.data() : { shopName: "My Shop", email: fbUser.email };
+          setCurrentUser({ uid: fbUser.uid, email: fbUser.email, ...profile });
+        } catch (e) {
+          setCurrentUser({ uid: fbUser.uid, email: fbUser.email, shopName: "My Shop" });
+        }
+      } else {
+        setCurrentUser(null);
+      }
+      setLoading(false);
+    });
+    return () => unsub();
   }, []);
 
   if (loading) {
@@ -513,7 +603,7 @@ function App() {
     );
   }
   if (!currentUser) return <AuthScreen onLogin={setCurrentUser} />;
-  return <Dashboard user={currentUser} onLogout={() => { clearSession(); setCurrentUser(null); }} />;
+  return <Dashboard user={currentUser} onLogout={() => { fbLogout(); setCurrentUser(null); }} />;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -521,14 +611,86 @@ function App() {
 // ══════════════════════════════════════════════════════════════════════════════
 function Dashboard({ user, onLogout }) {
   const [tab, setTab] = useState("summary");
-  const initial = useMemo(() => loadUserData(user.email), [user.email]);
-  const [clients, setClients] = useState(initial.clients);
-  const [staff, setStaff] = useState(initial.staff);
-  const [payments, setPayments] = useState(initial.payments);
+  const [clients, setClients] = useState([]);
+  const [staff, setStaff] = useState([]);
+  const [payments, setPayments] = useState([]);
+  const [dataReady, setDataReady] = useState(false);
 
-  useEffect(() => { saveUserClients(user.email, clients); }, [clients, user.email]);
-  useEffect(() => { saveUserStaff(user.email, staff); }, [staff, user.email]);
-  useEffect(() => { saveUserPayments(user.email, payments); }, [payments, user.email]);
+  // Subscribe to Firestore for real-time updates from any device
+  useEffect(() => {
+    if (!user?.uid) return;
+    const unsub = subscribeUserData(user.uid, ({ clients, staff, payments }) => {
+      setClients(clients);
+      setStaff(staff);
+      setPayments(payments);
+      setDataReady(true);
+    });
+    return () => unsub();
+  }, [user?.uid]);
+
+  // Helper: get a sync setter that writes to Firestore immediately.
+  // These wrap the same useState signature used everywhere in the app,
+  // so existing handlers don't need to change.
+  const setClientsWithSync = (updater) => {
+    setClients(prev => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      // Detect changes and write to Firestore
+      const prevById = new Map(prev.map(c => [c.id, c]));
+      const nextById = new Map(next.map(c => [c.id, c]));
+      // Saves & updates
+      next.forEach(c => {
+        const old = prevById.get(c.id);
+        if (!old || JSON.stringify(old) !== JSON.stringify(c)) {
+          fbSaveClient(user.uid, c).catch(e => console.error("Save client failed", e));
+        }
+      });
+      // Deletions
+      prev.forEach(c => {
+        if (!nextById.has(c.id)) {
+          fbDeleteClient(user.uid, c.id).catch(e => console.error("Delete client failed", e));
+        }
+      });
+      return next;
+    });
+  };
+  const setStaffWithSync = (updater) => {
+    setStaff(prev => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      const prevById = new Map(prev.map(s => [s.id, s]));
+      const nextById = new Map(next.map(s => [s.id, s]));
+      next.forEach(s => {
+        const old = prevById.get(s.id);
+        if (!old || JSON.stringify(old) !== JSON.stringify(s)) {
+          fbSaveStaff(user.uid, s).catch(e => console.error("Save staff failed", e));
+        }
+      });
+      prev.forEach(s => {
+        if (!nextById.has(s.id)) {
+          fbDeleteStaff(user.uid, s.id).catch(e => console.error("Delete staff failed", e));
+        }
+      });
+      return next;
+    });
+  };
+  const setPaymentsWithSync = (updater) => {
+    setPayments(prev => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      const prevById = new Map(prev.map(p => [p.id, p]));
+      const nextById = new Map(next.map(p => [p.id, p]));
+      next.forEach(p => {
+        const old = prevById.get(p.id);
+        if (!old || JSON.stringify(old) !== JSON.stringify(p)) {
+          fbSavePayment(user.uid, p).catch(e => console.error("Save payment failed", e));
+        }
+      });
+      prev.forEach(p => {
+        if (!nextById.has(p.id)) {
+          fbDeletePayment(user.uid, p.id).catch(e => console.error("Delete payment failed", e));
+        }
+      });
+      return next;
+    });
+  };
 
   const [selectedMonth, setSelectedMonth] = useState(() => todayISO().slice(0, 7));
   const [filter, setFilter] = useState("all");
