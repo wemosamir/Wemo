@@ -104,7 +104,7 @@ const todayISO = () => {
 const EMPTY_CLIENT = {
   id: "", client: "", phone: "", email: "", location: "",
   category: "Curtains", salesperson: "",
-  sales: "", deposit: "", cost: "", transport: "", allowance: "",
+  sales: "", deposit: "", cost: "", tailorCost: "", transport: "", allowance: "",
   measurements: "", productDetails: "",
   photos: [],
   date: todayISO(), note: "", paid: false,
@@ -121,6 +121,7 @@ const EXPENSE_CATEGORIES = [
   { value: "Shop Rent", emoji: "🏪", color: "#dc2626" },
   { value: "Electricity / Water / Internet", emoji: "💡", color: "#f59e0b" },
   { value: "Services (Cleaner, Security)", emoji: "🧹", color: "#0ea5e9" },
+  { value: "Tailor (Lump Sum / Salary)", emoji: "🧵", color: "#9333ea" },
   { value: "House Rent", emoji: "🏠", color: "#8b5cf6" },
   { value: "Fuel (Deliveries)", emoji: "⛽", color: "#10b981" },
   { value: "Fuel (Personal)", emoji: "🚗", color: "#14b8a6" },
@@ -904,7 +905,7 @@ function Dashboard({ user, onLogout }) {
     ...c,
     photos: c.photos || [],
     balance: Math.max(0, num(c.sales) - num(c.deposit)),
-    profit: num(c.sales) - num(c.cost) - num(c.transport) - num(c.allowance),
+    profit: num(c.sales) - num(c.cost) - num(c.tailorCost) - num(c.transport) - num(c.allowance),
     monthKey: monthKey(c.date),
   }));
 
@@ -975,6 +976,7 @@ function Dashboard({ user, onLogout }) {
     const deposit = rows.reduce((s, r) => s + num(r.deposit), 0);
     const balance = rows.reduce((s, r) => s + r.balance, 0);
     const cost = rows.reduce((s, r) => s + num(r.cost), 0);
+    const tailorCost = rows.reduce((s, r) => s + num(r.tailorCost), 0);
     const transport = rows.reduce((s, r) => s + num(r.transport), 0);
     const allowance = rows.reduce((s, r) => s + num(r.allowance), 0);
     const profit = rows.reduce((s, r) => s + r.profit, 0);
@@ -984,7 +986,7 @@ function Dashboard({ user, onLogout }) {
     const expPersonal = exps.filter(e => e.forBusiness === false).reduce((a, e) => a + num(e.amount), 0);
     const expTotal = expBusiness + expPersonal;
     return {
-      sales, deposit, balance, cost, transport, allowance, profit,
+      sales, deposit, balance, cost, tailorCost, transport, allowance, profit,
       salTotal, advTotal, staffTotal: salTotal + advTotal,
       expBusiness, expPersonal, expTotal,
       net: profit - salTotal - advTotal - expBusiness, count: rows.length,
@@ -1158,8 +1160,8 @@ function Dashboard({ user, onLogout }) {
 
   const today = new Date().toLocaleDateString("en-KE", { day: "numeric", month: "long", year: "numeric" });
   const previewBalance = Math.max(0, num(cForm.sales) - num(cForm.deposit));
-  const previewProfit = num(cForm.sales) - num(cForm.cost) - num(cForm.transport) - num(cForm.allowance);
-  const showPreview = cForm.sales || cForm.deposit || cForm.cost || cForm.transport || cForm.allowance;
+  const previewProfit = num(cForm.sales) - num(cForm.cost) - num(cForm.tailorCost) - num(cForm.transport) - num(cForm.allowance);
+  const showPreview = cForm.sales || cForm.deposit || cForm.cost || cForm.tailorCost || cForm.transport || cForm.allowance;
 
   const pctChange = (current, previous) => {
     if (!previous) return null;
@@ -2342,9 +2344,10 @@ function SalesTab(props) {
 
           <FormSection title="⑤ Costs" color="#ef4444">
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-              <Field label="Cost (KSh)"><TInput type="number" value={cForm.cost} onChange={v => setCForm(f => ({ ...f, cost: v }))} placeholder="0" /></Field>
+              <Field label="Product Cost (KSh)"><TInput type="number" value={cForm.cost} onChange={v => setCForm(f => ({ ...f, cost: v }))} placeholder="0" /></Field>
+              <Field label="🧵 Tailor Cost (KSh)"><TInput type="number" value={cForm.tailorCost} onChange={v => setCForm(f => ({ ...f, tailorCost: v }))} placeholder="0" /></Field>
               <Field label="Transport (KSh)"><TInput type="number" value={cForm.transport} onChange={v => setCForm(f => ({ ...f, transport: v }))} placeholder="0" /></Field>
-              <Field label="Allowance (KSh)" span={2}><TInput type="number" value={cForm.allowance} onChange={v => setCForm(f => ({ ...f, allowance: v }))} placeholder="0" /></Field>
+              <Field label="Allowance (KSh)"><TInput type="number" value={cForm.allowance} onChange={v => setCForm(f => ({ ...f, allowance: v }))} placeholder="0" /></Field>
             </div>
           </FormSection>
 
@@ -2492,6 +2495,7 @@ function SalesTab(props) {
                     { label: "Deposit", value: fmtShort(r.deposit), color: "#10b981" },
                     { label: "Balance", value: fmtShort(r.balance), color: r.balance > 0 && !r.paid ? "#f59e0b" : "#10b981" },
                     { label: "Cost", value: fmtShort(r.cost), color: "#ef4444" },
+                    { label: "Tailor", value: fmtShort(num(r.tailorCost)), color: "#9333ea" },
                     { label: "Transp", value: fmtShort(r.transport), color: "#f59e0b" },
                     { label: "Allow", value: fmtShort(r.allowance), color: "#a855f7" },
                     { label: "Profit", value: fmtShort(r.profit), color: r.profit >= 0 ? "#10b981" : "#ef4444" },
@@ -2578,7 +2582,7 @@ function MonthlySummary({ monthTotals, prevTotals, selectedMonth, prevMonthKey, 
         </div>
         <div style={{ background: "#fff", borderRadius: 12, padding: "14px", borderTop: "4px solid #ef4444", boxShadow: "0 2px 8px rgba(15,23,42,0.06)" }}>
           <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", color: "#94a3b8", fontFamily: "sans-serif" }}>💸 Money Out</div>
-          <div style={{ fontSize: 18, fontWeight: 800, color: "#ef4444", marginTop: 4 }}>{fmt(monthTotals.cost + monthTotals.transport + monthTotals.allowance + monthTotals.staffTotal + monthTotals.expBusiness)}</div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: "#ef4444", marginTop: 4 }}>{fmt(monthTotals.cost + monthTotals.tailorCost + monthTotals.transport + monthTotals.allowance + monthTotals.staffTotal + monthTotals.expBusiness)}</div>
         </div>
       </div>
 
@@ -2595,6 +2599,7 @@ function MonthlySummary({ monthTotals, prevTotals, selectedMonth, prevMonthKey, 
               { label: "Number of Clients", value: monthTotals.count, raw: true, color: "#0f172a" },
               { section: "Costs" },
               { label: "Product Cost", value: monthTotals.cost, color: "#ef4444", neg: true },
+              { label: "🧵 Tailor Cost", value: monthTotals.tailorCost, color: "#9333ea", neg: true },
               { label: "Transport", value: monthTotals.transport, color: "#f59e0b", neg: true },
               { label: "Allowance", value: monthTotals.allowance, color: "#a855f7", neg: true },
               { section: "Profit" },
