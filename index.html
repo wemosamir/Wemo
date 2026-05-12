@@ -190,18 +190,27 @@ function subscribeUserData(uid, onData) {
     if (ready.c && ready.s && ready.p) onData({ clients, staff, payments });
   };
   const userRef = window.fbDB.collection("users").doc(uid);
-  const unsubC = userRef.collection("clients").onSnapshot(snap => {
-    clients = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    ready.c = true; tryEmit();
-  });
-  const unsubS = userRef.collection("staff").onSnapshot(snap => {
-    staff = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    ready.s = true; tryEmit();
-  });
-  const unsubP = userRef.collection("payments").onSnapshot(snap => {
-    payments = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    ready.p = true; tryEmit();
-  });
+  const unsubC = userRef.collection("clients").onSnapshot(
+    snap => {
+      clients = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      ready.c = true; tryEmit();
+    },
+    err => { console.error("[FIRESTORE] clients listener error:", err.code, err.message); alert("Firestore error (clients): " + err.code + " — " + err.message); }
+  );
+  const unsubS = userRef.collection("staff").onSnapshot(
+    snap => {
+      staff = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      ready.s = true; tryEmit();
+    },
+    err => { console.error("[FIRESTORE] staff listener error:", err.code, err.message); }
+  );
+  const unsubP = userRef.collection("payments").onSnapshot(
+    snap => {
+      payments = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      ready.p = true; tryEmit();
+    },
+    err => { console.error("[FIRESTORE] payments listener error:", err.code, err.message); }
+  );
   return () => { unsubC(); unsubS(); unsubP(); };
 }
 
@@ -757,7 +766,10 @@ function Dashboard({ user, onLogout }) {
       next.forEach(c => {
         const old = prevById.get(c.id);
         if (!old || JSON.stringify(old) !== JSON.stringify(c)) {
-          fbSaveClient(user.uid, c).catch(e => console.error("Save client failed", e));
+          fbSaveClient(user.uid, c).catch(e => {
+            console.error("[SAVE] Save client failed:", e.code, e.message);
+            alert("Save failed: " + (e.code || "") + " — " + (e.message || "unknown"));
+          });
         }
       });
       // Deletions
@@ -972,18 +984,18 @@ function Dashboard({ user, onLogout }) {
     if (!cForm.client.trim() || !cForm.sales) return;
     const date = cForm.date || todayISO();
     if (cEditing) {
-      setClients(prev => prev.map(c => c.id === cEditing ? { ...cForm, date } : c));
+      setClientsWithSync(prev => prev.map(c => c.id === cEditing ? { ...cForm, date } : c));
       setCEditing(null);
     } else {
-      setClients(prev => [{ ...cForm, date }, ...prev]);
+      setClientsWithSync(prev => [{ ...cForm, date }, ...prev]);
     }
     setCForm({ ...EMPTY_CLIENT, id: uid(), photos: [] });
     setCOpen(false);
   };
   const editClient = (c) => { setCEditing(c.id); setCForm({ ...c, photos: c.photos || [] }); setCOpen(true); setViewingClient(null); setTab("sales"); };
-  const deleteClient = (id) => { if (window.confirm("Delete this entry?")) { setClients(p => p.filter(c => c.id !== id)); setViewingClient(null); } };
+  const deleteClient = (id) => { if (window.confirm("Delete this entry?")) { setClientsWithSync(p => p.filter(c => c.id !== id)); setViewingClient(null); } };
   const cancelClient = () => { setCEditing(null); setCForm({ ...EMPTY_CLIENT, id: uid(), photos: [] }); setCOpen(false); };
-  const togglePaid = (id) => setClients(p => p.map(c => c.id === id ? { ...c, paid: !c.paid } : c));
+  const togglePaid = (id) => setClientsWithSync(p => p.map(c => c.id === id ? { ...c, paid: !c.paid } : c));
   const reorderForClient = (c) => {
     const newEntry = {
       ...c, id: uid(), date: todayISO(),
@@ -999,10 +1011,10 @@ function Dashboard({ user, onLogout }) {
   const saveStaff = () => {
     if (!stForm.name.trim()) return;
     if (stEditing) {
-      setStaff(prev => prev.map(s => s.id === stEditing ? { ...stForm } : s));
+      setStaffWithSync(prev => prev.map(s => s.id === stEditing ? { ...stForm } : s));
       setStEditing(null);
     } else {
-      setStaff(prev => [...prev, { ...stForm }]);
+      setStaffWithSync(prev => [...prev, { ...stForm }]);
     }
     setStForm({ ...EMPTY_STAFF, id: uid() });
     setStOpen(false);
@@ -1013,29 +1025,29 @@ function Dashboard({ user, onLogout }) {
     let msg = "Delete this staff member?";
     if (hasPayments) msg += "\n\n⚠️ All their salary/advance records will also be deleted.";
     if (window.confirm(msg)) {
-      setStaff(p => p.filter(s => s.id !== id));
-      setPayments(p => p.filter(pay => pay.staffId !== id));
+      setStaffWithSync(p => p.filter(s => s.id !== id));
+      setPaymentsWithSync(p => p.filter(pay => pay.staffId !== id));
       setViewingStaff(null);
     }
   };
   const cancelStaff = () => { setStEditing(null); setStForm({ ...EMPTY_STAFF, id: uid() }); setStOpen(false); };
-  const toggleStaffActive = (id) => setStaff(p => p.map(s => s.id === id ? { ...s, active: !s.active } : s));
+  const toggleStaffActive = (id) => setStaffWithSync(p => p.map(s => s.id === id ? { ...s, active: !s.active } : s));
 
   // PAYMENT CRUD
   const savePayment = () => {
     if (!pForm.staffId || !pForm.amount) return;
     const date = pForm.date || todayISO();
     if (pEditing) {
-      setPayments(prev => prev.map(p => p.id === pEditing ? { ...pForm, date } : p));
+      setPaymentsWithSync(prev => prev.map(p => p.id === pEditing ? { ...pForm, date } : p));
       setPEditing(null);
     } else {
-      setPayments(prev => [{ ...pForm, date }, ...prev]);
+      setPaymentsWithSync(prev => [{ ...pForm, date }, ...prev]);
     }
     setPForm({ ...EMPTY_PAYMENT, id: uid() });
     setPOpen(false);
   };
   const editPayment = (p) => { setPEditing(p.id); setPForm({ ...p }); setPOpen(true); };
-  const deletePayment = (id) => { if (window.confirm("Delete this payment?")) setPayments(prev => prev.filter(p => p.id !== id)); };
+  const deletePayment = (id) => { if (window.confirm("Delete this payment?")) setPaymentsWithSync(prev => prev.filter(p => p.id !== id)); };
   const cancelPayment = () => { setPEditing(null); setPForm({ ...EMPTY_PAYMENT, id: uid() }); setPOpen(false); };
 
   // Quick action: pay full remaining salary
@@ -1044,7 +1056,7 @@ function Dashboard({ user, onLogout }) {
     const s = staff.find(x => x.id === staffId);
     if (!s) return;
     if (window.confirm(`Pay ${fmt(remaining)} to ${s.name} as salary?`)) {
-      setPayments(prev => [{
+      setPaymentsWithSync(prev => [{
         id: uid(),
         staffId,
         type: "Salary",
