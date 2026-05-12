@@ -111,7 +111,7 @@ const EMPTY_CLIENT = {
 };
 
 // NEW staff structure: each staff member has a profile with set salary
-const EMPTY_STAFF = { id: "", name: "", role: "", monthlySalary: "", joinDate: todayISO(), active: true };
+const EMPTY_STAFF = { id: "", name: "", role: "", phone: "", idNumber: "", nationality: "", residence: "", notes: "", monthlySalary: "", joinDate: todayISO(), active: true };
 
 // Each transaction tracks salary payments OR advance payments tied to a staff
 const EMPTY_PAYMENT = { id: "", staffId: "", type: "Advance", amount: "", date: todayISO(), note: "" };
@@ -195,7 +195,7 @@ function subscribeUserData(uid, onData) {
       clients = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       ready.c = true; tryEmit();
     },
-    err => { console.error("[FIRESTORE] clients listener error:", err.code, err.message); alert("Firestore error (clients): " + err.code + " — " + err.message); }
+    err => console.error("[FIRESTORE] clients listener error:", err.code, err.message)
   );
   const unsubS = userRef.collection("staff").onSnapshot(
     snap => {
@@ -766,10 +766,7 @@ function Dashboard({ user, onLogout }) {
       next.forEach(c => {
         const old = prevById.get(c.id);
         if (!old || JSON.stringify(old) !== JSON.stringify(c)) {
-          fbSaveClient(user.uid, c).catch(e => {
-            console.error("[SAVE] Save client failed:", e.code, e.message);
-            alert("Save failed: " + (e.code || "") + " — " + (e.message || "unknown"));
-          });
+          fbSaveClient(user.uid, c).catch(e => console.error("[SAVE] Save client failed:", e.code, e.message));
         }
       });
       // Deletions
@@ -1329,6 +1326,54 @@ function StaffDetailModal({ staff, breakdown, payments, currentMonth, onClose, o
         </div>
 
         <div style={{ padding: "20px" }}>
+          {/* Personal info — only shown if at least one field is filled */}
+          {(staff.phone || staff.idNumber || staff.nationality || staff.residence || staff.joinDate || staff.notes) && (
+            <Section title="👤 Personal Information">
+              <div style={{
+                background: "#f8fafc", borderRadius: 10, padding: "12px",
+                fontSize: 13, fontFamily: "sans-serif", color: "#0f172a",
+                display: "grid", gap: 8,
+              }}>
+                {staff.phone && (
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <span style={{ minWidth: 110, color: "#64748b" }}>📱 Phone:</span>
+                    <a href={`tel:${staff.phone}`} style={{ color: "#0ea5e9", fontWeight: 600, textDecoration: "none" }}>{staff.phone}</a>
+                  </div>
+                )}
+                {staff.idNumber && (
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <span style={{ minWidth: 110, color: "#64748b" }}>🆔 ID / Passport:</span>
+                    <span style={{ fontWeight: 600 }}>{staff.idNumber}</span>
+                  </div>
+                )}
+                {staff.nationality && (
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <span style={{ minWidth: 110, color: "#64748b" }}>🌍 Nationality:</span>
+                    <span style={{ fontWeight: 600 }}>{staff.nationality}</span>
+                  </div>
+                )}
+                {staff.residence && (
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <span style={{ minWidth: 110, color: "#64748b" }}>🏠 Residence:</span>
+                    <span style={{ fontWeight: 600 }}>{staff.residence}</span>
+                  </div>
+                )}
+                {staff.joinDate && (
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <span style={{ minWidth: 110, color: "#64748b" }}>📅 Joined:</span>
+                    <span style={{ fontWeight: 600 }}>{staff.joinDate}</span>
+                  </div>
+                )}
+                {staff.notes && (
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <span style={{ minWidth: 110, color: "#64748b" }}>📝 Notes:</span>
+                    <span style={{ fontWeight: 500, flex: 1 }}>{staff.notes}</span>
+                  </div>
+                )}
+              </div>
+            </Section>
+          )}
+
           {/* Salary breakdown for current month */}
           <Section title={`💰 ${formatMonthKey(currentMonth)} Salary`}>
             {monthlySalary === 0 ? (
@@ -1559,6 +1604,18 @@ function StaffTab({
             <Field label="Full Name" span={2}>
               <TInput value={stForm.name} onChange={v => setStForm(f => ({ ...f, name: v }))} placeholder="e.g. Hassan Mohamed" />
             </Field>
+            <Field label="📱 Phone Number" span={2}>
+              <TInput type="tel" value={stForm.phone} onChange={v => setStForm(f => ({ ...f, phone: v }))} placeholder="e.g. 0712 345 678" />
+            </Field>
+            <Field label="🆔 ID / Passport Number">
+              <TInput value={stForm.idNumber} onChange={v => setStForm(f => ({ ...f, idNumber: v }))} placeholder="e.g. 12345678" />
+            </Field>
+            <Field label="🌍 Nationality">
+              <TInput value={stForm.nationality} onChange={v => setStForm(f => ({ ...f, nationality: v }))} placeholder="e.g. Kenyan" />
+            </Field>
+            <Field label="🏠 Residence / Address" span={2}>
+              <TInput value={stForm.residence} onChange={v => setStForm(f => ({ ...f, residence: v }))} placeholder="e.g. Eastleigh, Nairobi" />
+            </Field>
             <Field label="Role / Position">
               <TInput value={stForm.role} onChange={v => setStForm(f => ({ ...f, role: v }))} placeholder="e.g. Salesperson" />
             </Field>
@@ -1567,6 +1624,9 @@ function StaffTab({
             </Field>
             <Field label="Monthly Salary (KSh)" span={2}>
               <TInput type="number" value={stForm.monthlySalary} onChange={v => setStForm(f => ({ ...f, monthlySalary: v }))} placeholder="e.g. 25000" />
+            </Field>
+            <Field label="📝 Notes (anything else)" span={2}>
+              <TInput value={stForm.notes} onChange={v => setStForm(f => ({ ...f, notes: v }))} placeholder="e.g. Next of kin, emergency contact, etc." />
             </Field>
           </div>
           <label style={{
@@ -1736,6 +1796,11 @@ function StaffTab({
                     <div style={{ fontSize: 12, color: "#94a3b8", fontFamily: "sans-serif" }}>
                       {s.role || "Staff"} · Salary: <strong style={{ color: "#dc2626" }}>{fmt(s.monthlySalary)}</strong>
                     </div>
+                    {s.phone && (
+                      <div style={{ fontSize: 11, color: "#0ea5e9", fontFamily: "sans-serif", marginTop: 2 }}>
+                        📱 {s.phone}
+                      </div>
+                    )}
                   </div>
                   <div style={{ textAlign: "right", flexShrink: 0 }}>
                     <div style={{ fontSize: 11, color: "#94a3b8", fontFamily: "sans-serif" }}>Remaining</div>
