@@ -116,6 +116,22 @@ const EMPTY_STAFF = { id: "", name: "", role: "", phone: "", idNumber: "", natio
 // Each transaction tracks salary payments OR advance payments tied to a staff
 const EMPTY_PAYMENT = { id: "", staffId: "", type: "Advance", amount: "", date: todayISO(), note: "" };
 
+// Expense categories (covers business + personal)
+const EXPENSE_CATEGORIES = [
+  { value: "Shop Rent", emoji: "🏪", color: "#dc2626" },
+  { value: "Electricity / Water / Internet", emoji: "💡", color: "#f59e0b" },
+  { value: "Services (Cleaner, Security)", emoji: "🧹", color: "#0ea5e9" },
+  { value: "House Rent", emoji: "🏠", color: "#8b5cf6" },
+  { value: "Fuel (Deliveries)", emoji: "⛽", color: "#10b981" },
+  { value: "Fuel (Personal)", emoji: "🚗", color: "#14b8a6" },
+  { value: "Car Maintenance", emoji: "🔧", color: "#64748b" },
+  { value: "Family / Home", emoji: "👶", color: "#ec4899" },
+  { value: "Groceries", emoji: "🛒", color: "#84cc16" },
+  { value: "Other", emoji: "📦", color: "#475569" },
+];
+
+const EMPTY_EXPENSE = { id: "", category: "Shop Rent", amount: "", date: todayISO(), note: "", forBusiness: true };
+
 // ── Image compression ─────────────────────────────────────────────────────────
 function compressImage(file, maxWidth = 1000, quality = 0.75) {
   return new Promise((resolve, reject) => {
@@ -184,10 +200,10 @@ async function fbLogout() {
 // Subscribe to real-time data updates for a user. Returns an unsubscribe function.
 function subscribeUserData(uid, onData) {
   if (!uid) return () => {};
-  let clients = [], staff = [], payments = [];
-  let ready = { c: false, s: false, p: false };
+  let clients = [], staff = [], payments = [], expenses = [];
+  let ready = { c: false, s: false, p: false, e: false };
   const tryEmit = () => {
-    if (ready.c && ready.s && ready.p) onData({ clients, staff, payments });
+    if (ready.c && ready.s && ready.p && ready.e) onData({ clients, staff, payments, expenses });
   };
   const userRef = window.fbDB.collection("users").doc(uid);
   const unsubC = userRef.collection("clients").onSnapshot(
@@ -211,7 +227,14 @@ function subscribeUserData(uid, onData) {
     },
     err => { console.error("[FIRESTORE] payments listener error:", err.code, err.message); }
   );
-  return () => { unsubC(); unsubS(); unsubP(); };
+  const unsubE = userRef.collection("expenses").onSnapshot(
+    snap => {
+      expenses = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      ready.e = true; tryEmit();
+    },
+    err => { console.error("[FIRESTORE] expenses listener error:", err.code, err.message); }
+  );
+  return () => { unsubC(); unsubS(); unsubP(); unsubE(); };
 }
 
 // Save a single client (create or update). The doc id is the client's id field.
@@ -246,6 +269,17 @@ async function fbSavePayment(uid, p) {
 async function fbDeletePayment(uid, paymentId) {
   if (!uid || !paymentId) return;
   await window.fbDB.collection("users").doc(uid).collection("payments").doc(paymentId).delete();
+}
+
+// Save a single expense
+async function fbSaveExpense(uid, e) {
+  if (!uid || !e?.id) return;
+  const { id, ...data } = e;
+  await window.fbDB.collection("users").doc(uid).collection("expenses").doc(id).set(data);
+}
+async function fbDeleteExpense(uid, expenseId) {
+  if (!uid || !expenseId) return;
+  await window.fbDB.collection("users").doc(uid).collection("expenses").doc(expenseId).delete();
 }
 
 function monthKey(dateStr) {
@@ -739,15 +773,17 @@ function Dashboard({ user, onLogout }) {
   const [clients, setClients] = useState([]);
   const [staff, setStaff] = useState([]);
   const [payments, setPayments] = useState([]);
+  const [expenses, setExpenses] = useState([]);
   const [dataReady, setDataReady] = useState(false);
 
   // Subscribe to Firestore for real-time updates from any device
   useEffect(() => {
     if (!user?.uid) return;
-    const unsub = subscribeUserData(user.uid, ({ clients, staff, payments }) => {
+    const unsub = subscribeUserData(user.uid, ({ clients, staff, payments, expenses }) => {
       setClients(clients);
       setStaff(staff);
       setPayments(payments);
+      setExpenses(expenses || []);
       setDataReady(true);
     });
     return () => unsub();
@@ -816,6 +852,25 @@ function Dashboard({ user, onLogout }) {
       return next;
     });
   };
+  const setExpensesWithSync = (updater) => {
+    setExpenses(prev => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      const prevById = new Map(prev.map(e => [e.id, e]));
+      const nextById = new Map(next.map(e => [e.id, e]));
+      next.forEach(e => {
+        const old = prevById.get(e.id);
+        if (!old || JSON.stringify(old) !== JSON.stringify(e)) {
+          fbSaveExpense(user.uid, e).catch(err => console.error("Save expense failed", err));
+        }
+      });
+      prev.forEach(e => {
+        if (!nextById.has(e.id)) {
+          fbDeleteExpense(user.uid, e.id).catch(err => console.error("Delete expense failed", err));
+        }
+      });
+      return next;
+    });
+  };
 
   const [selectedMonth, setSelectedMonth] = useState(() => todayISO().slice(0, 7));
   const [filter, setFilter] = useState("all");
@@ -837,6 +892,11 @@ function Dashboard({ user, onLogout }) {
   const [pForm, setPForm] = useState({ ...EMPTY_PAYMENT, id: uid() });
   const [pEditing, setPEditing] = useState(null);
   const [pOpen, setPOpen] = useState(false);
+
+  // Expense form state
+  const [eForm, setEForm] = useState({ ...EMPTY_EXPENSE, id: uid() });
+  const [eEditing, setEEditing] = useState(null);
+  const [eOpen, setEOpen] = useState(false);
 
   const [clientSearch, setClientSearch] = useState("");
 
@@ -907,7 +967,10 @@ function Dashboard({ user, onLogout }) {
     return Object.values(map).sort((a, b) => b.totalSold - a.totalSold);
   }, [monthRows]);
 
-  const totalsFor = (rows, pays) => {
+  const monthExpenses = useMemo(() => expenses.filter(e => monthKey(e.date) === selectedMonth), [expenses, selectedMonth]);
+  const prevMonthExpenses = useMemo(() => expenses.filter(e => monthKey(e.date) === prevMonthKey), [expenses, prevMonthKey]);
+
+  const totalsFor = (rows, pays, exps = []) => {
     const sales = rows.reduce((s, r) => s + num(r.sales), 0);
     const deposit = rows.reduce((s, r) => s + num(r.deposit), 0);
     const balance = rows.reduce((s, r) => s + r.balance, 0);
@@ -917,15 +980,19 @@ function Dashboard({ user, onLogout }) {
     const profit = rows.reduce((s, r) => s + r.profit, 0);
     const salTotal = pays.filter(p => p.type === "Salary").reduce((a, p) => a + num(p.amount), 0);
     const advTotal = pays.filter(p => p.type === "Advance").reduce((a, p) => a + num(p.amount), 0);
+    const expBusiness = exps.filter(e => e.forBusiness !== false).reduce((a, e) => a + num(e.amount), 0);
+    const expPersonal = exps.filter(e => e.forBusiness === false).reduce((a, e) => a + num(e.amount), 0);
+    const expTotal = expBusiness + expPersonal;
     return {
       sales, deposit, balance, cost, transport, allowance, profit,
       salTotal, advTotal, staffTotal: salTotal + advTotal,
-      net: profit - salTotal - advTotal, count: rows.length,
+      expBusiness, expPersonal, expTotal,
+      net: profit - salTotal - advTotal - expBusiness, count: rows.length,
     };
   };
 
-  const monthTotals = useMemo(() => totalsFor(monthRows, monthPayments), [monthRows, monthPayments]);
-  const prevTotals = useMemo(() => totalsFor(prevMonthRows, prevMonthPayments), [prevMonthRows, prevMonthPayments]);
+  const monthTotals = useMemo(() => totalsFor(monthRows, monthPayments, monthExpenses), [monthRows, monthPayments, monthExpenses]);
+  const prevTotals = useMemo(() => totalsFor(prevMonthRows, prevMonthPayments, prevMonthExpenses), [prevMonthRows, prevMonthPayments, prevMonthExpenses]);
 
   const visibleRows = useMemo(() => {
     let rows = [...monthRows];
@@ -1047,6 +1114,23 @@ function Dashboard({ user, onLogout }) {
   const deletePayment = (id) => { if (window.confirm("Delete this payment?")) setPaymentsWithSync(prev => prev.filter(p => p.id !== id)); };
   const cancelPayment = () => { setPEditing(null); setPForm({ ...EMPTY_PAYMENT, id: uid() }); setPOpen(false); };
 
+  // EXPENSE CRUD
+  const saveExpense = () => {
+    if (!eForm.category || !eForm.amount) return;
+    const date = eForm.date || todayISO();
+    if (eEditing) {
+      setExpensesWithSync(prev => prev.map(x => x.id === eEditing ? { ...eForm, date } : x));
+      setEEditing(null);
+    } else {
+      setExpensesWithSync(prev => [{ ...eForm, date }, ...prev]);
+    }
+    setEForm({ ...EMPTY_EXPENSE, id: uid() });
+    setEOpen(false);
+  };
+  const editExpense = (x) => { setEEditing(x.id); setEForm({ ...x }); setEOpen(true); };
+  const deleteExpense = (id) => { if (window.confirm("Delete this expense?")) setExpensesWithSync(prev => prev.filter(x => x.id !== id)); };
+  const cancelExpense = () => { setEEditing(null); setEForm({ ...EMPTY_EXPENSE, id: uid() }); setEOpen(false); };
+
   // Quick action: pay full remaining salary
   const payRemainingSalary = (staffId, remaining) => {
     if (remaining <= 0) return;
@@ -1125,6 +1209,7 @@ function Dashboard({ user, onLogout }) {
             { key: "clients", label: "👤 Clients" },
             { key: "categories", label: "📊 Categories" },
             { key: "staff", label: "👥 Staff" },
+            { key: "expenses", label: "💸 Expenses" },
           ].map(t => (
             <button key={t.key} onClick={() => setTab(t.key)} style={{
               padding: "7px 14px", borderRadius: 20, border: "none", whiteSpace: "nowrap",
@@ -1191,7 +1276,7 @@ function Dashboard({ user, onLogout }) {
       />}
 
       <div style={{ padding: "16px", maxWidth: 700, margin: "0 auto" }}>
-        {(tab === "summary" || tab === "sales" || tab === "categories" || tab === "staff") && (
+        {(tab === "summary" || tab === "sales" || tab === "categories" || tab === "staff" || tab === "expenses") && (
           <div style={{
             background: "#fff", borderRadius: 12, padding: "12px 14px",
             marginBottom: 14, boxShadow: "0 2px 8px rgba(15,23,42,0.06)",
@@ -1262,6 +1347,18 @@ function Dashboard({ user, onLogout }) {
             setViewingStaff={setViewingStaff}
             payRemainingSalary={payRemainingSalary}
             giveAdvance={giveAdvance}
+          />
+        )}
+
+        {tab === "expenses" && (
+          <ExpensesTab
+            expenses={expenses}
+            selectedMonth={selectedMonth}
+            eOpen={eOpen} setEOpen={setEOpen}
+            eForm={eForm} setEForm={setEForm}
+            eEditing={eEditing}
+            saveExpense={saveExpense} cancelExpense={cancelExpense}
+            editExpense={editExpense} deleteExpense={deleteExpense}
           />
         )}
       </div>
@@ -2481,7 +2578,7 @@ function MonthlySummary({ monthTotals, prevTotals, selectedMonth, prevMonthKey, 
         </div>
         <div style={{ background: "#fff", borderRadius: 12, padding: "14px", borderTop: "4px solid #ef4444", boxShadow: "0 2px 8px rgba(15,23,42,0.06)" }}>
           <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", color: "#94a3b8", fontFamily: "sans-serif" }}>💸 Money Out</div>
-          <div style={{ fontSize: 18, fontWeight: 800, color: "#ef4444", marginTop: 4 }}>{fmt(monthTotals.cost + monthTotals.transport + monthTotals.allowance + monthTotals.staffTotal)}</div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: "#ef4444", marginTop: 4 }}>{fmt(monthTotals.cost + monthTotals.transport + monthTotals.allowance + monthTotals.staffTotal + monthTotals.expBusiness)}</div>
         </div>
       </div>
 
@@ -2505,6 +2602,9 @@ function MonthlySummary({ monthTotals, prevTotals, selectedMonth, prevMonthKey, 
               { section: "Staff" },
               { label: "Salaries Paid", value: monthTotals.salTotal, color: "#7c3aed", neg: true },
               { label: "Advances Given", value: monthTotals.advTotal, color: "#be185d", neg: true },
+              { section: "Other Expenses" },
+              { label: "🏪 Business Expenses", value: monthTotals.expBusiness, color: "#be185d", neg: true },
+              { label: "🏠 Personal Expenses (not in profit)", value: monthTotals.expPersonal, color: "#94a3b8", raw: false },
               { section: "Bottom Line" },
               { label: "NET PROFIT", value: monthTotals.net, color: monthTotals.net >= 0 ? "#10b981" : "#ef4444", strong: true, big: true },
             ].map((row, i) => {
@@ -2621,6 +2721,226 @@ function CategoriesTab({ monthRows, selectedMonth, monthCategoryTotals, monthTot
           </tr>
         </tfoot>
       </table>
+    </div>
+  );
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── EXPENSES TAB ──────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+function ExpensesTab({ expenses, selectedMonth, eOpen, setEOpen, eForm, setEForm, eEditing, saveExpense, cancelExpense, editExpense, deleteExpense }) {
+  const [filterCat, setFilterCat] = useState("all");
+
+  // Filter to selected month
+  const monthExpenses = expenses.filter(e => monthKey(e.date) === selectedMonth);
+
+  // Filter by category if needed
+  const visibleExpenses = filterCat === "all"
+    ? monthExpenses
+    : monthExpenses.filter(e => e.category === filterCat);
+
+  // Sort newest first
+  const sortedExpenses = [...visibleExpenses].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+
+  // Calculate totals by category
+  const categoryTotals = {};
+  monthExpenses.forEach(e => {
+    if (!categoryTotals[e.category]) categoryTotals[e.category] = { total: 0, count: 0 };
+    categoryTotals[e.category].total += num(e.amount);
+    categoryTotals[e.category].count += 1;
+  });
+
+  const totalAll = monthExpenses.reduce((a, e) => a + num(e.amount), 0);
+  const totalBusiness = monthExpenses.filter(e => e.forBusiness !== false).reduce((a, e) => a + num(e.amount), 0);
+  const totalPersonal = monthExpenses.filter(e => e.forBusiness === false).reduce((a, e) => a + num(e.amount), 0);
+
+  return (
+    <div>
+      {/* TOTAL CARD */}
+      <div style={{
+        background: "linear-gradient(135deg, #be185d 0%, #831843 100%)",
+        color: "#fff", borderRadius: 14, padding: "20px",
+        marginBottom: 16, boxShadow: "0 6px 18px rgba(190, 24, 93, 0.3)",
+      }}>
+        <div style={{ fontSize: 11, letterSpacing: 1.5, textTransform: "uppercase", opacity: 0.85, fontFamily: "sans-serif", marginBottom: 4 }}>
+          {formatMonthKey(selectedMonth)} Expenses
+        </div>
+        <div style={{ fontSize: 32, fontWeight: 800, letterSpacing: -1, marginBottom: 12 }}>{fmt(totalAll)}</div>
+        <div style={{ display: "flex", gap: 12, fontSize: 12 }}>
+          <div style={{ flex: 1, background: "rgba(255,255,255,0.15)", borderRadius: 8, padding: "8px 10px" }}>
+            <div style={{ fontSize: 10, opacity: 0.85, fontFamily: "sans-serif" }}>🏪 Business</div>
+            <div style={{ fontSize: 16, fontWeight: 800 }}>{fmtShort(totalBusiness)}</div>
+          </div>
+          <div style={{ flex: 1, background: "rgba(255,255,255,0.15)", borderRadius: 8, padding: "8px 10px" }}>
+            <div style={{ fontSize: 10, opacity: 0.85, fontFamily: "sans-serif" }}>🏠 Personal</div>
+            <div style={{ fontSize: 16, fontWeight: 800 }}>{fmtShort(totalPersonal)}</div>
+          </div>
+        </div>
+      </div>
+
+      {/* ADD BUTTON */}
+      {!eOpen && (
+        <button onClick={() => setEOpen(true)} style={{
+          width: "100%", background: "#be185d", color: "#fff", border: "none",
+          borderRadius: 12, padding: "14px", fontSize: 15, fontWeight: 700,
+          cursor: "pointer", fontFamily: "Georgia, serif", marginBottom: 16,
+          boxShadow: "0 4px 12px rgba(190, 24, 93, 0.25)",
+        }}>+ Add Expense</button>
+      )}
+
+      {/* EXPENSE FORM */}
+      {eOpen && (
+        <div style={{
+          background: "#fff", borderRadius: 12, padding: "18px",
+          marginBottom: 16, boxShadow: "0 2px 12px rgba(15,23,42,0.1)",
+          borderLeft: "4px solid #be185d",
+        }}>
+          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 14, color: "#0f172a" }}>
+            {eEditing ? "✏️ Edit Expense" : "➕ Record New Expense"}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+            <Field label="Category" span={2}>
+              <TSelect value={eForm.category} onChange={v => setEForm(f => ({ ...f, category: v }))}>
+                {EXPENSE_CATEGORIES.map(c => (
+                  <option key={c.value} value={c.value}>{c.emoji} {c.value}</option>
+                ))}
+              </TSelect>
+            </Field>
+            <Field label="Amount (KSh)">
+              <TInput type="number" value={eForm.amount} onChange={v => setEForm(f => ({ ...f, amount: v }))} placeholder="0" />
+            </Field>
+            <Field label="Date">
+              <TInput type="date" value={eForm.date} onChange={v => setEForm(f => ({ ...f, date: v }))} />
+            </Field>
+            <Field label="📝 Note (optional)" span={2}>
+              <TInput value={eForm.note} onChange={v => setEForm(f => ({ ...f, note: v }))} placeholder="e.g. May rent, fuel for Karen delivery, etc." />
+            </Field>
+          </div>
+          <label style={{
+            display: "flex", alignItems: "center", gap: 12, padding: "10px 12px",
+            background: eForm.forBusiness ? "#fce7f3" : "#f8fafc",
+            border: `1.5px solid ${eForm.forBusiness ? "#be185d" : "#e2e8f0"}`,
+            borderRadius: 10, cursor: "pointer", marginBottom: 14,
+          }}>
+            <PaidToggle checked={eForm.forBusiness} onToggle={() => setEForm(f => ({ ...f, forBusiness: !f.forBusiness }))} size="md" />
+            <div style={{ fontSize: 13, fontWeight: 600, color: eForm.forBusiness ? "#831843" : "#0f172a", fontFamily: "sans-serif" }}>
+              {eForm.forBusiness ? "🏪 Business expense" : "🏠 Personal expense"}
+            </div>
+          </label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={saveExpense} style={{
+              flex: 1, background: "#be185d", color: "#fff", border: "none",
+              borderRadius: 8, padding: "11px", fontSize: 14, fontWeight: 700,
+              cursor: "pointer", fontFamily: "Georgia, serif",
+            }}>{eEditing ? "Update" : "Save Expense"}</button>
+            <button onClick={cancelExpense} style={{
+              padding: "11px 18px", border: "1.5px solid #e2e8f0", borderRadius: 8,
+              background: "#fff", color: "#64748b", fontSize: 14, cursor: "pointer",
+              fontFamily: "Georgia, serif",
+            }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* BREAKDOWN BY CATEGORY */}
+      {monthExpenses.length > 0 && (
+        <div style={{
+          background: "#fff", borderRadius: 12, overflow: "hidden",
+          marginBottom: 16, boxShadow: "0 2px 8px rgba(15,23,42,0.06)",
+        }}>
+          <div style={{ background: "#0f172a", color: "#fff", padding: "12px 16px" }}>
+            <div style={{ fontSize: 13, fontWeight: 800 }}>📊 Breakdown by Category</div>
+          </div>
+          <div style={{ padding: "4px 0" }}>
+            <button onClick={() => setFilterCat("all")} style={{
+              width: "100%", textAlign: "left", padding: "10px 16px",
+              background: filterCat === "all" ? "#fef2f2" : "transparent",
+              border: "none", borderBottom: "1px solid #f1f5f9",
+              cursor: "pointer", fontFamily: "Georgia, serif",
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+            }}>
+              <span style={{ fontWeight: 700, fontSize: 13 }}>📋 All Categories</span>
+              <span style={{ fontWeight: 800, fontSize: 13, color: "#be185d" }}>{fmt(totalAll)}</span>
+            </button>
+            {EXPENSE_CATEGORIES.filter(c => categoryTotals[c.value]?.count > 0).map(c => {
+              const t = categoryTotals[c.value];
+              return (
+                <button key={c.value} onClick={() => setFilterCat(c.value)} style={{
+                  width: "100%", textAlign: "left", padding: "10px 16px",
+                  background: filterCat === c.value ? "#fef2f2" : "transparent",
+                  border: "none", borderBottom: "1px solid #f1f5f9",
+                  cursor: "pointer", fontFamily: "Georgia, serif",
+                  display: "flex", justifyContent: "space-between", alignItems: "center",
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 10, height: 10, borderRadius: 3, background: c.color }}></span>
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: 13, color: "#0f172a" }}>{c.emoji} {c.value}</div>
+                      <div style={{ fontSize: 10, color: "#94a3b8", fontFamily: "sans-serif" }}>{t.count} entr{t.count !== 1 ? "ies" : "y"}</div>
+                    </div>
+                  </div>
+                  <span style={{ fontWeight: 800, fontSize: 13, color: c.color }}>{fmt(t.total)}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* EXPENSE LIST */}
+      {monthExpenses.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "50px 20px", color: "#94a3b8", background: "#fff", borderRadius: 12, border: "1.5px dashed #e2e8f0" }}>
+          <div style={{ fontSize: 36, marginBottom: 10 }}>💸</div>
+          <div>No expenses for {formatMonthKey(selectedMonth)}.</div>
+          <div style={{ fontSize: 11, marginTop: 6 }}>Tap <strong>+ Add Expense</strong> to start tracking.</div>
+        </div>
+      ) : (
+        <div style={{ background: "#fff", borderRadius: 12, overflow: "hidden", boxShadow: "0 2px 8px rgba(15,23,42,0.06)" }}>
+          {sortedExpenses.map((e, i) => {
+            const cat = EXPENSE_CATEGORIES.find(c => c.value === e.category) || EXPENSE_CATEGORIES[EXPENSE_CATEGORIES.length - 1];
+            return (
+              <div key={e.id} style={{
+                padding: "14px 16px", borderTop: i > 0 ? "1px solid #f1f5f9" : "none",
+                display: "flex", alignItems: "center", gap: 12,
+              }}>
+                <div style={{
+                  width: 40, height: 40, borderRadius: 10,
+                  background: cat.color, color: "#fff",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 18, flexShrink: 0,
+                }}>{cat.emoji}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 14, color: "#0f172a" }}>{e.category}</div>
+                  <div style={{ fontSize: 11, color: "#94a3b8", fontFamily: "sans-serif" }}>
+                    {e.date} · {e.forBusiness === false ? "🏠 Personal" : "🏪 Business"}
+                  </div>
+                  {e.note && (
+                    <div style={{ fontSize: 11, color: "#64748b", fontFamily: "sans-serif", marginTop: 2, fontStyle: "italic" }}>
+                      {e.note}
+                    </div>
+                  )}
+                </div>
+                <div style={{ textAlign: "right", flexShrink: 0 }}>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: cat.color }}>{fmt(num(e.amount))}</div>
+                  <div style={{ display: "flex", gap: 4, justifyContent: "flex-end", marginTop: 4 }}>
+                    <button onClick={() => editExpense(e)} style={{
+                      background: "#f1f5f9", border: "none", borderRadius: 6,
+                      padding: "4px 8px", fontSize: 10, cursor: "pointer", color: "#0f172a",
+                      fontFamily: "sans-serif",
+                    }}>Edit</button>
+                    <button onClick={() => deleteExpense(e.id)} style={{
+                      background: "#fee2e2", border: "none", borderRadius: 6,
+                      padding: "4px 8px", fontSize: 10, cursor: "pointer", color: "#dc2626",
+                      fontFamily: "sans-serif",
+                    }}>Del</button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
