@@ -322,9 +322,10 @@ function Label({ children }) {
 function Field({ label, children, span }) {
   return <div style={span ? { gridColumn: `span ${span}` } : {}}><Label>{label}</Label>{children}</div>;
 }
-function TInput({ value, onChange, placeholder, type = "text" }) {
+function TInput({ value, onChange, placeholder, type = "text", onKeyDown }) {
   return (
     <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+      onKeyDown={onKeyDown}
       style={{
         width: "100%", border: "1.5px solid #e2e8f0", borderRadius: 8,
         padding: "10px 12px", fontSize: 15, fontFamily: "Georgia, serif",
@@ -616,9 +617,9 @@ function AuthScreen({ onLogin }) {
             <div style={{ fontSize: 22, fontWeight: 800, color: "#0f172a", marginBottom: 4 }}>Welcome back 👋</div>
             <div style={{ fontSize: 13, color: "#64748b", fontFamily: "sans-serif" }}>Login to access your business data.</div>
           </div>
-          <Field label="Email"><TInput type="email" value={email} onChange={setEmail} placeholder="you@example.com" /></Field>
+          <Field label="Email"><TInput type="email" value={email} onChange={setEmail} placeholder="you@example.com" onKeyDown={e => { if (e.key === "Enter" && !busy) handleLogin(); }} /></Field>
           <div style={{ height: 12 }} />
-          <Field label="Password"><TInput type="password" value={password} onChange={setPassword} placeholder="Your password" /></Field>
+          <Field label="Password"><TInput type="password" value={password} onChange={setPassword} placeholder="Your password" onKeyDown={e => { if (e.key === "Enter" && !busy) handleLogin(); }} /></Field>
           {error && <div style={{ marginTop: 14, padding: "10px 12px", background: "#fee2e2", border: "1px solid #fca5a5", borderRadius: 8, fontSize: 13, color: "#b91c1c", fontFamily: "sans-serif" }}>⚠️ {error}</div>}
           <button onClick={handleLogin} disabled={busy} style={{ width: "100%", background: busy ? "#94a3b8" : "#dc2626", color: "#fff", border: "none", borderRadius: 10, padding: "13px", fontSize: 15, fontWeight: 700, cursor: busy ? "wait" : "pointer", fontFamily: "Georgia, serif", marginTop: 20 }}>{busy ? "Logging in..." : "Login"}</button>
           <div style={{ textAlign: "center", marginTop: 18, fontSize: 13, color: "#64748b", fontFamily: "sans-serif" }}>
@@ -637,13 +638,13 @@ function AuthScreen({ onLogin }) {
         <div style={{ marginBottom: 24 }}>
           <div style={{ fontSize: 22, fontWeight: 800, color: "#0f172a", marginBottom: 4 }}>Create profile</div>
         </div>
-        <Field label="Shop Name"><TInput value={shopName} onChange={setShopName} placeholder="e.g. Wemo Curtains" /></Field>
+        <Field label="Shop Name"><TInput value={shopName} onChange={setShopName} placeholder="e.g. Wemo Curtains" onKeyDown={e => { if (e.key === "Enter" && !busy) handleSignup(); }} /></Field>
         <div style={{ height: 12 }} />
-        <Field label="Email"><TInput type="email" value={email} onChange={setEmail} placeholder="you@example.com" /></Field>
+        <Field label="Email"><TInput type="email" value={email} onChange={setEmail} placeholder="you@example.com" onKeyDown={e => { if (e.key === "Enter" && !busy) handleSignup(); }} /></Field>
         <div style={{ height: 12 }} />
-        <Field label="Password"><TInput type="password" value={password} onChange={setPassword} placeholder="Min 4 characters" /></Field>
+        <Field label="Password"><TInput type="password" value={password} onChange={setPassword} placeholder="Min 4 characters" onKeyDown={e => { if (e.key === "Enter" && !busy) handleSignup(); }} /></Field>
         <div style={{ height: 12 }} />
-        <Field label="Confirm Password"><TInput type="password" value={confirmPassword} onChange={setConfirmPassword} placeholder="Repeat password" /></Field>
+        <Field label="Confirm Password"><TInput type="password" value={confirmPassword} onChange={setConfirmPassword} placeholder="Repeat password" onKeyDown={e => { if (e.key === "Enter" && !busy) handleSignup(); }} /></Field>
         {error && <div style={{ marginTop: 14, padding: "10px 12px", background: "#fee2e2", border: "1px solid #fca5a5", borderRadius: 8, fontSize: 13, color: "#b91c1c", fontFamily: "sans-serif" }}>⚠️ {error}</div>}
         <button onClick={handleSignup} disabled={busy} style={{ width: "100%", background: busy ? "#94a3b8" : "#dc2626", color: "#fff", border: "none", borderRadius: 10, padding: "13px", fontSize: 15, fontWeight: 700, cursor: busy ? "wait" : "pointer", fontFamily: "Georgia, serif", marginTop: 20 }}>{busy ? "Creating profile..." : "Create Profile"}</button>
         <div style={{ textAlign: "center", marginTop: 18, fontSize: 13, color: "#64748b", fontFamily: "sans-serif" }}>
