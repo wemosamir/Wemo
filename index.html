@@ -108,6 +108,7 @@ const EMPTY_CLIENT = {
   measurements: "", productDetails: "",
   photos: [],
   date: todayISO(), note: "", paid: false,
+  delivered: false, deliveryDate: "",
 };
 
 // NEW staff structure: each staff member has a profile with set salary
@@ -297,6 +298,19 @@ function formatMonthKeyShort(key) {
   if (key === "no-date") return "No Date";
   const [y, m] = key.split("-");
   return `${MONTH_NAMES[parseInt(m, 10) - 1]} ${y}`;
+}
+// Friendly daily label: "Today", "Yesterday", or "Tue, 12 May 2026"
+function formatDateNice(iso) {
+  if (!iso) return "";
+  const today = todayISO();
+  if (iso === today) return "Today";
+  const t = new Date(today);
+  t.setDate(t.getDate() - 1);
+  const yesterday = t.toISOString().slice(0, 10);
+  if (iso === yesterday) return "Yesterday";
+  const d = new Date(iso + "T00:00:00");
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  return `${days[d.getDay()]}, ${d.getDate()} ${MONTH_NAMES[d.getMonth()]} ${d.getFullYear()}`;
 }
 
 // ── Reusable UI ───────────────────────────────────────────────────────────────
@@ -875,6 +889,8 @@ function Dashboard({ user, onLogout }) {
   };
 
   const [selectedMonth, setSelectedMonth] = useState(() => todayISO().slice(0, 7));
+  const [viewMode, setViewMode] = useState("month"); // "month" or "day"
+  const [selectedDate, setSelectedDate] = useState(() => todayISO());
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
@@ -930,8 +946,14 @@ function Dashboard({ user, onLogout }) {
     return `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, "0")}`;
   }, [selectedMonth]);
 
-  const monthRows = useMemo(() => allClientRows.filter(r => r.monthKey === selectedMonth), [allClientRows, selectedMonth]);
-  const monthPayments = useMemo(() => payments.filter(p => monthKey(p.date) === selectedMonth), [payments, selectedMonth]);
+  const monthRows = useMemo(() => {
+    if (viewMode === "day") return allClientRows.filter(r => r.date === selectedDate);
+    return allClientRows.filter(r => r.monthKey === selectedMonth);
+  }, [allClientRows, selectedMonth, selectedDate, viewMode]);
+  const monthPayments = useMemo(() => {
+    if (viewMode === "day") return payments.filter(p => p.date === selectedDate);
+    return payments.filter(p => monthKey(p.date) === selectedMonth);
+  }, [payments, selectedMonth, selectedDate, viewMode]);
   const prevMonthRows = useMemo(() => allClientRows.filter(r => r.monthKey === prevMonthKey), [allClientRows, prevMonthKey]);
   const prevMonthPayments = useMemo(() => payments.filter(p => monthKey(p.date) === prevMonthKey), [payments, prevMonthKey]);
 
@@ -969,7 +991,13 @@ function Dashboard({ user, onLogout }) {
     return Object.values(map).sort((a, b) => b.totalSold - a.totalSold);
   }, [monthRows]);
 
-  const monthExpenses = useMemo(() => expenses.filter(e => monthKey(e.date) === selectedMonth), [expenses, selectedMonth]);
+  const monthExpenses = useMemo(() => {
+    if (viewMode === "day") return expenses.filter(e => e.date === selectedDate);
+    return expenses.filter(e => monthKey(e.date) === selectedMonth);
+  }, [expenses, selectedMonth, selectedDate, viewMode]);
+
+  // Friendly label for current period — used in headers across tabs
+  const periodLabel = viewMode === "day" ? formatDateNice(selectedDate) : formatMonthKey(selectedMonth);
   const prevMonthExpenses = useMemo(() => expenses.filter(e => monthKey(e.date) === prevMonthKey), [expenses, prevMonthKey]);
 
   const totalsFor = (rows, pays, exps = []) => {
@@ -1063,6 +1091,11 @@ function Dashboard({ user, onLogout }) {
   const deleteClient = (id) => { if (window.confirm("Delete this entry?")) { setClientsWithSync(p => p.filter(c => c.id !== id)); setViewingClient(null); } };
   const cancelClient = () => { setCEditing(null); setCForm({ ...EMPTY_CLIENT, id: uid(), photos: [] }); setCOpen(false); };
   const togglePaid = (id) => setClientsWithSync(p => p.map(c => c.id === id ? { ...c, paid: !c.paid } : c));
+  const toggleDelivered = (id) => setClientsWithSync(p => p.map(c => {
+    if (c.id !== id) return c;
+    const willBeDelivered = !c.delivered;
+    return { ...c, delivered: willBeDelivered, deliveryDate: willBeDelivered ? todayISO() : "" };
+  }));
   const reorderForClient = (c) => {
     const newEntry = {
       ...c, id: uid(), date: todayISO(),
@@ -1209,6 +1242,7 @@ function Dashboard({ user, onLogout }) {
           {[
             { key: "summary", label: "📅 Monthly" },
             { key: "sales", label: "💼 Sales" },
+            { key: "pending", label: "⏳ Pending" },
             { key: "clients", label: "👤 Clients" },
             { key: "categories", label: "📊 Categories" },
             { key: "staff", label: "👥 Staff" },
@@ -1283,17 +1317,54 @@ function Dashboard({ user, onLogout }) {
           <div style={{
             background: "#fff", borderRadius: 12, padding: "12px 14px",
             marginBottom: 14, boxShadow: "0 2px 8px rgba(15,23,42,0.06)",
-            display: "flex", alignItems: "center", gap: 10,
           }}>
-            <div style={{ fontSize: 11, letterSpacing: 1.5, textTransform: "uppercase", color: "#94a3b8", fontFamily: "sans-serif", fontWeight: 700 }}>📅 Viewing</div>
-            <select value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)} style={{
-              flex: 1, border: "1.5px solid #e2e8f0", borderRadius: 8,
-              padding: "8px 10px", fontSize: 14, fontWeight: 700,
-              fontFamily: "Georgia, serif", color: "#0f172a",
-              background: "#f8fafc", cursor: "pointer", outline: "none",
-            }}>
-              {availableMonths.map(m => <option key={m} value={m}>{formatMonthKey(m)}</option>)}
-            </select>
+            {/* Toggle */}
+            <div style={{ display: "flex", gap: 6, marginBottom: 10, background: "#f1f5f9", padding: 4, borderRadius: 8 }}>
+              <button onClick={() => setViewMode("month")} style={{
+                flex: 1, padding: "7px 8px", border: "none", borderRadius: 6,
+                background: viewMode === "month" ? "#dc2626" : "transparent",
+                color: viewMode === "month" ? "#fff" : "#64748b",
+                fontWeight: 700, fontSize: 12, fontFamily: "Georgia, serif",
+                cursor: "pointer", letterSpacing: 0.5,
+              }}>📅 Monthly</button>
+              <button onClick={() => setViewMode("day")} style={{
+                flex: 1, padding: "7px 8px", border: "none", borderRadius: 6,
+                background: viewMode === "day" ? "#dc2626" : "transparent",
+                color: viewMode === "day" ? "#fff" : "#64748b",
+                fontWeight: 700, fontSize: 12, fontFamily: "Georgia, serif",
+                cursor: "pointer", letterSpacing: 0.5,
+              }}>☀️ Daily</button>
+            </div>
+            {/* Picker */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ fontSize: 11, letterSpacing: 1.5, textTransform: "uppercase", color: "#94a3b8", fontFamily: "sans-serif", fontWeight: 700 }}>VIEWING</div>
+              {viewMode === "month" ? (
+                <select value={selectedMonth} onChange={e => setSelectedMonth(e.target.value)} style={{
+                  flex: 1, border: "1.5px solid #e2e8f0", borderRadius: 8,
+                  padding: "8px 10px", fontSize: 14, fontWeight: 700,
+                  fontFamily: "Georgia, serif", color: "#0f172a",
+                  background: "#f8fafc", cursor: "pointer", outline: "none",
+                }}>
+                  {availableMonths.map(m => <option key={m} value={m}>{formatMonthKey(m)}</option>)}
+                </select>
+              ) : (
+                <>
+                  <input type="date" value={selectedDate} onChange={e => setSelectedDate(e.target.value)} style={{
+                    flex: 1, border: "1.5px solid #e2e8f0", borderRadius: 8,
+                    padding: "8px 10px", fontSize: 14, fontWeight: 700,
+                    fontFamily: "Georgia, serif", color: "#0f172a",
+                    background: "#f8fafc", outline: "none",
+                  }} />
+                  <button onClick={() => setSelectedDate(todayISO())} style={{
+                    padding: "8px 12px", border: "1.5px solid #dc2626", borderRadius: 8,
+                    background: selectedDate === todayISO() ? "#dc2626" : "#fff",
+                    color: selectedDate === todayISO() ? "#fff" : "#dc2626",
+                    fontWeight: 700, fontSize: 12, fontFamily: "Georgia, serif",
+                    cursor: "pointer",
+                  }}>Today</button>
+                </>
+              )}
+            </div>
           </div>
         )}
 
@@ -1304,6 +1375,8 @@ function Dashboard({ user, onLogout }) {
             monthRows={monthRows} monthPayments={monthPayments}
             unpaidCount={unpaidCount} pctChange={pctChange}
             monthCategoryTotals={monthCategoryTotals} setTab={setTab}
+            periodLabel={periodLabel} viewMode={viewMode}
+            monthExpenses={monthExpenses}
           />
         )}
 
@@ -1320,6 +1393,7 @@ function Dashboard({ user, onLogout }) {
             togglePaid={togglePaid}
             setViewingClient={setViewingClient}
             monthTotals={monthTotals}
+            periodLabel={periodLabel} viewMode={viewMode}
           />
         )}
 
@@ -1353,6 +1427,15 @@ function Dashboard({ user, onLogout }) {
           />
         )}
 
+        {tab === "pending" && (
+          <PendingTab
+            clients={clients}
+            togglePaid={togglePaid}
+            toggleDelivered={toggleDelivered}
+            setViewingClient={setViewingClient}
+          />
+        )}
+
         {tab === "expenses" && (
           <ExpensesTab
             expenses={expenses}
@@ -1362,6 +1445,9 @@ function Dashboard({ user, onLogout }) {
             eEditing={eEditing}
             saveExpense={saveExpense} cancelExpense={cancelExpense}
             editExpense={editExpense} deleteExpense={deleteExpense}
+            periodLabel={periodLabel} viewMode={viewMode}
+            selectedDate={selectedDate}
+            monthExpenses={monthExpenses}
           />
         )}
       </div>
@@ -2270,6 +2356,7 @@ function SalesTab(props) {
     search, setSearch, filter, setFilter,
     monthRows, unpaidCount, visibleRows, selectedMonth,
     togglePaid, setViewingClient, monthTotals,
+    periodLabel, viewMode,
   } = props;
 
   return (
@@ -2358,13 +2445,28 @@ function SalesTab(props) {
 
           <label style={{
             display: "flex", alignItems: "center", gap: 12, padding: "12px 14px",
+            background: cForm.delivered ? "#fef3c7" : "#f8fafc",
+            border: `1.5px solid ${cForm.delivered ? "#f59e0b" : "#e2e8f0"}`,
+            borderRadius: 10, cursor: "pointer", marginBottom: 10,
+          }}>
+            <PaidToggle checked={cForm.delivered} onToggle={() => setCForm(f => ({
+              ...f, delivered: !f.delivered, deliveryDate: !f.delivered ? todayISO() : ""
+            }))} size="lg" />
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 14, color: cForm.delivered ? "#92400e" : "#0f172a" }}>📦 Mark as Delivered</div>
+              <div style={{ fontSize: 12, color: cForm.delivered ? "#b45309" : "#64748b", fontFamily: "sans-serif" }}>{cForm.delivered ? `Delivered on ${cForm.deliveryDate || "today"}` : "Tick once curtains are delivered"}</div>
+            </div>
+          </label>
+
+          <label style={{
+            display: "flex", alignItems: "center", gap: 12, padding: "12px 14px",
             background: cForm.paid ? "#d1fae5" : "#f8fafc",
             border: `1.5px solid ${cForm.paid ? "#10b981" : "#e2e8f0"}`,
             borderRadius: 10, cursor: "pointer", marginBottom: 14,
           }}>
             <PaidToggle checked={cForm.paid} onToggle={() => setCForm(f => ({ ...f, paid: !f.paid }))} size="lg" />
             <div>
-              <div style={{ fontWeight: 700, fontSize: 14, color: cForm.paid ? "#065f46" : "#0f172a" }}>Mark as Fully Paid</div>
+              <div style={{ fontWeight: 700, fontSize: 14, color: cForm.paid ? "#065f46" : "#0f172a" }}>💰 Mark as Fully Paid</div>
               <div style={{ fontSize: 12, color: cForm.paid ? "#059669" : "#64748b", fontFamily: "sans-serif" }}>{cForm.paid ? "All payments received" : "Tick once balance is settled"}</div>
             </div>
           </label>
@@ -2433,7 +2535,7 @@ function SalesTab(props) {
       {monthRows.length === 0 ? (
         <div style={{ textAlign: "center", padding: "50px 20px", color: "#94a3b8", background: "#fff", borderRadius: 12, border: "1.5px dashed #e2e8f0" }}>
           <div style={{ fontSize: 36, marginBottom: 10 }}>📋</div>
-          <div>No entries for {formatMonthKey(selectedMonth)}.</div>
+          <div>No entries for {periodLabel}.</div>
         </div>
       ) : visibleRows.length === 0 ? (
         <div style={{ textAlign: "center", padding: "30px 20px", color: "#94a3b8", background: "#fff", borderRadius: 12, border: "1.5px dashed #e2e8f0" }}>No matches.</div>
@@ -2549,7 +2651,7 @@ function FormSection({ title, color, children }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-function MonthlySummary({ monthTotals, prevTotals, selectedMonth, prevMonthKey, monthRows, monthPayments, unpaidCount, pctChange, monthCategoryTotals, setTab }) {
+function MonthlySummary({ monthTotals, prevTotals, selectedMonth, prevMonthKey, monthRows, monthPayments, unpaidCount, pctChange, monthCategoryTotals, setTab, periodLabel, viewMode, monthExpenses }) {
   return (
     <div>
       <div style={{
@@ -2557,10 +2659,10 @@ function MonthlySummary({ monthTotals, prevTotals, selectedMonth, prevMonthKey, 
         color: "#fff", borderRadius: 14, padding: "20px",
         marginBottom: 14, boxShadow: "0 6px 20px rgba(220,38,38,0.35)",
       }}>
-        <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", opacity: 0.7, fontFamily: "sans-serif", marginBottom: 4 }}>{formatMonthKey(selectedMonth)} Summary</div>
+        <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", opacity: 0.7, fontFamily: "sans-serif", marginBottom: 4 }}>{periodLabel} Summary</div>
         <div style={{ fontSize: 28, fontWeight: 800, letterSpacing: -1, marginBottom: 2 }}>{fmt(monthTotals.net)}</div>
         <div style={{ fontSize: 12, opacity: 0.85, fontFamily: "sans-serif" }}>Net profit after {monthTotals.count} sale{monthTotals.count !== 1 ? "s" : ""} & all costs</div>
-        {prevTotals.count > 0 && (
+        {viewMode !== "day" && prevTotals.count > 0 && (
           <div style={{ marginTop: 14, padding: "10px 12px", background: "rgba(255,255,255,0.12)", borderRadius: 10 }}>
             <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", opacity: 0.7, fontFamily: "sans-serif", marginBottom: 4 }}>vs {formatMonthKeyShort(prevMonthKey)}</div>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, fontFamily: "sans-serif" }}>
@@ -2735,12 +2837,10 @@ function CategoriesTab({ monthRows, selectedMonth, monthCategoryTotals, monthTot
 // ══════════════════════════════════════════════════════════════════════════════
 // ── EXPENSES TAB ──────────────────────────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════════
-function ExpensesTab({ expenses, selectedMonth, eOpen, setEOpen, eForm, setEForm, eEditing, saveExpense, cancelExpense, editExpense, deleteExpense }) {
+function ExpensesTab({ expenses, selectedMonth, eOpen, setEOpen, eForm, setEForm, eEditing, saveExpense, cancelExpense, editExpense, deleteExpense, periodLabel, viewMode, selectedDate, monthExpenses }) {
   const [filterCat, setFilterCat] = useState("all");
 
-  // Filter to selected month
-  const monthExpenses = expenses.filter(e => monthKey(e.date) === selectedMonth);
-
+  // monthExpenses comes pre-filtered (day or month) from parent
   // Filter by category if needed
   const visibleExpenses = filterCat === "all"
     ? monthExpenses
@@ -2770,7 +2870,7 @@ function ExpensesTab({ expenses, selectedMonth, eOpen, setEOpen, eForm, setEForm
         marginBottom: 16, boxShadow: "0 6px 18px rgba(190, 24, 93, 0.3)",
       }}>
         <div style={{ fontSize: 11, letterSpacing: 1.5, textTransform: "uppercase", opacity: 0.85, fontFamily: "sans-serif", marginBottom: 4 }}>
-          {formatMonthKey(selectedMonth)} Expenses
+          {periodLabel} Expenses
         </div>
         <div style={{ fontSize: 32, fontWeight: 800, letterSpacing: -1, marginBottom: 12 }}>{fmt(totalAll)}</div>
         <div style={{ display: "flex", gap: 12, fontSize: 12 }}>
@@ -2787,7 +2887,11 @@ function ExpensesTab({ expenses, selectedMonth, eOpen, setEOpen, eForm, setEForm
 
       {/* ADD BUTTON */}
       {!eOpen && (
-        <button onClick={() => setEOpen(true)} style={{
+        <button onClick={() => {
+          // When in day view, pre-fill date to the selected date
+          if (viewMode === "day") setEForm(f => ({ ...f, date: selectedDate }));
+          setEOpen(true);
+        }} style={{
           width: "100%", background: "#be185d", color: "#fff", border: "none",
           borderRadius: 12, padding: "14px", fontSize: 15, fontWeight: 700,
           cursor: "pointer", fontFamily: "Georgia, serif", marginBottom: 16,
@@ -2898,7 +3002,7 @@ function ExpensesTab({ expenses, selectedMonth, eOpen, setEOpen, eForm, setEForm
       {monthExpenses.length === 0 ? (
         <div style={{ textAlign: "center", padding: "50px 20px", color: "#94a3b8", background: "#fff", borderRadius: 12, border: "1.5px dashed #e2e8f0" }}>
           <div style={{ fontSize: 36, marginBottom: 10 }}>💸</div>
-          <div>No expenses for {formatMonthKey(selectedMonth)}.</div>
+          <div>No expenses for {periodLabel}.</div>
           <div style={{ fontSize: 11, marginTop: 6 }}>Tap <strong>+ Add Expense</strong> to start tracking.</div>
         </div>
       ) : (
@@ -2945,6 +3049,134 @@ function ExpensesTab({ expenses, selectedMonth, eOpen, setEOpen, eForm, setEForm
               </div>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── PENDING TAB ───────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+function PendingTab({ clients, togglePaid, toggleDelivered, setViewingClient }) {
+  const [section, setSection] = useState("orders"); // "orders" or "balances"
+
+  // Decorated rows with computed balance
+  const rows = clients.map(c => ({
+    ...c,
+    balance: num(c.sales) - num(c.deposit),
+  }));
+
+  // Pending orders: not delivered yet (regardless of payment)
+  const pendingOrders = rows
+    .filter(r => !r.delivered)
+    .sort((a, b) => (a.date || "").localeCompare(b.date || "")); // oldest first
+
+  // Pending balances: not fully paid AND balance > 0
+  // Includes both delivered-not-paid AND not-delivered-not-paid
+  const pendingBalances = rows
+    .filter(r => !r.paid && r.balance > 0)
+    .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+
+  // Totals
+  const totalPendingBalance = pendingBalances.reduce((a, r) => a + r.balance, 0);
+  const totalOrderValue = pendingOrders.reduce((a, r) => a + num(r.sales), 0);
+
+  const list = section === "orders" ? pendingOrders : pendingBalances;
+
+  return (
+    <div>
+      {/* Top KPI cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
+        <button onClick={() => setSection("orders")} style={{
+          background: section === "orders" ? "linear-gradient(135deg, #f59e0b, #d97706)" : "#fff",
+          color: section === "orders" ? "#fff" : "#0f172a",
+          border: section === "orders" ? "none" : "2px solid #e2e8f0",
+          borderRadius: 14, padding: "16px", textAlign: "left",
+          cursor: "pointer", fontFamily: "Georgia, serif",
+          boxShadow: section === "orders" ? "0 6px 16px rgba(245, 158, 11, 0.3)" : "0 2px 8px rgba(15,23,42,0.06)",
+        }}>
+          <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", opacity: section === "orders" ? 0.85 : 0.5, fontFamily: "sans-serif" }}>📦 Awaiting Delivery</div>
+          <div style={{ fontSize: 24, fontWeight: 800, marginTop: 4 }}>{pendingOrders.length}</div>
+          <div style={{ fontSize: 11, opacity: section === "orders" ? 0.9 : 0.6, marginTop: 2, fontFamily: "sans-serif" }}>{fmt(totalOrderValue)} total</div>
+        </button>
+        <button onClick={() => setSection("balances")} style={{
+          background: section === "balances" ? "linear-gradient(135deg, #ef4444, #dc2626)" : "#fff",
+          color: section === "balances" ? "#fff" : "#0f172a",
+          border: section === "balances" ? "none" : "2px solid #e2e8f0",
+          borderRadius: 14, padding: "16px", textAlign: "left",
+          cursor: "pointer", fontFamily: "Georgia, serif",
+          boxShadow: section === "balances" ? "0 6px 16px rgba(239, 68, 68, 0.3)" : "0 2px 8px rgba(15,23,42,0.06)",
+        }}>
+          <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", opacity: section === "balances" ? 0.85 : 0.5, fontFamily: "sans-serif" }}>💰 Unpaid Balances</div>
+          <div style={{ fontSize: 24, fontWeight: 800, marginTop: 4 }}>{pendingBalances.length}</div>
+          <div style={{ fontSize: 11, opacity: section === "balances" ? 0.9 : 0.6, marginTop: 2, fontFamily: "sans-serif" }}>{fmt(totalPendingBalance)} owed</div>
+        </button>
+      </div>
+
+      {/* List */}
+      {list.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "50px 20px", color: "#94a3b8", background: "#fff", borderRadius: 12, border: "1.5px dashed #e2e8f0" }}>
+          <div style={{ fontSize: 36, marginBottom: 10 }}>{section === "orders" ? "✅" : "🎉"}</div>
+          <div>{section === "orders" ? "All orders delivered!" : "No outstanding balances!"}</div>
+          <div style={{ fontSize: 11, marginTop: 6 }}>You're all caught up.</div>
+        </div>
+      ) : (
+        <div style={{ background: "#fff", borderRadius: 12, overflow: "hidden", boxShadow: "0 2px 8px rgba(15,23,42,0.06)" }}>
+          {list.map((r, i) => (
+            <div key={r.id} style={{
+              padding: "14px 16px",
+              borderTop: i > 0 ? "1px solid #f1f5f9" : "none",
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 10 }}>
+                <div style={{ flex: 1, minWidth: 0, cursor: "pointer" }} onClick={() => setViewingClient(r)}>
+                  <div style={{ fontWeight: 700, fontSize: 15, color: "#0f172a" }}>{r.client || "Unnamed"}</div>
+                  <div style={{ fontSize: 11, color: "#94a3b8", fontFamily: "sans-serif", marginTop: 2 }}>
+                    {r.date} {r.phone && `· 📱 ${r.phone}`} {r.location && `· 📍 ${r.location}`}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+                    {!r.delivered && (
+                      <span style={{ fontSize: 10, padding: "2px 8px", background: "#fef3c7", color: "#92400e", borderRadius: 4, fontWeight: 700, fontFamily: "sans-serif" }}>📦 NOT DELIVERED</span>
+                    )}
+                    {r.delivered && (
+                      <span style={{ fontSize: 10, padding: "2px 8px", background: "#d1fae5", color: "#065f46", borderRadius: 4, fontWeight: 700, fontFamily: "sans-serif" }}>✅ DELIVERED</span>
+                    )}
+                    {!r.paid && r.balance > 0 && (
+                      <span style={{ fontSize: 10, padding: "2px 8px", background: "#fee2e2", color: "#991b1b", borderRadius: 4, fontWeight: 700, fontFamily: "sans-serif" }}>💰 BALANCE DUE</span>
+                    )}
+                  </div>
+                </div>
+                <div style={{ textAlign: "right", flexShrink: 0 }}>
+                  <div style={{ fontSize: 10, color: "#94a3b8", letterSpacing: 1, textTransform: "uppercase", fontFamily: "sans-serif" }}>Balance</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: r.balance > 0 ? "#ef4444" : "#10b981" }}>{fmt(r.balance)}</div>
+                  <div style={{ fontSize: 11, color: "#64748b", fontFamily: "sans-serif", marginTop: 2 }}>
+                    of {fmtShort(r.sales)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Action buttons */}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => toggleDelivered(r.id)} style={{
+                  flex: 1, padding: "10px", border: "none", borderRadius: 8,
+                  background: r.delivered ? "#10b981" : "#f59e0b",
+                  color: "#fff", fontWeight: 700, fontSize: 12,
+                  cursor: "pointer", fontFamily: "Georgia, serif",
+                }}>
+                  {r.delivered ? "✅ Delivered" : "📦 Mark Delivered"}
+                </button>
+                <button onClick={() => togglePaid(r.id)} style={{
+                  flex: 1, padding: "10px", border: "none", borderRadius: 8,
+                  background: r.paid ? "#10b981" : "#dc2626",
+                  color: "#fff", fontWeight: 700, fontSize: 12,
+                  cursor: "pointer", fontFamily: "Georgia, serif",
+                }}>
+                  {r.paid ? "✅ Paid" : "💰 Mark Paid"}
+                </button>
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>
