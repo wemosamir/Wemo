@@ -62,8 +62,24 @@
       window.fbAuth = firebase.auth();
       window.fbDB = firebase.firestore();
       window.fbReady = true;
-      // Enable offline support so the app works without internet
-      // Note: offline persistence disabled to avoid Safari hang issues
+      // Enable offline support — works in background, doesn't block app load.
+      // Cached writes persist when offline and sync when network returns.
+      try {
+        window.fbDB.enablePersistence({ synchronizeTabs: true }).catch(err => {
+          // failed-precondition = multiple tabs open without synchronizeTabs (we DO have it)
+          // unimplemented = browser doesn't support it (older Safari, private mode)
+          if (err.code === "failed-precondition") {
+            console.warn("[OFFLINE] Persistence failed: multiple tabs without sync.");
+          } else if (err.code === "unimplemented") {
+            console.warn("[OFFLINE] Browser doesn't support offline persistence.");
+          } else {
+            console.warn("[OFFLINE] Persistence error:", err.message);
+          }
+        });
+        console.log("[OFFLINE] Persistence enabled");
+      } catch (e) {
+        console.warn("[OFFLINE] Could not enable persistence:", e.message);
+      }
     } catch (e) {
       console.error("Firebase init failed:", e);
       window.fbReady = false;
@@ -794,6 +810,19 @@ function Dashboard({ user, onLogout }) {
   const [payments, setPayments] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [dataReady, setDataReady] = useState(false);
+  const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
+
+  // Listen for online/offline changes
+  useEffect(() => {
+    const goOnline = () => setIsOnline(true);
+    const goOffline = () => setIsOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    return () => {
+      window.removeEventListener("online", goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, []);
 
   // Subscribe to Firestore for real-time updates from any device
   useEffect(() => {
@@ -1260,6 +1289,19 @@ function Dashboard({ user, onLogout }) {
           ))}
         </div>
       </div>
+
+      {/* Offline banner */}
+      {!isOnline && (
+        <div style={{
+          background: "#f59e0b", color: "#fff", padding: "10px 16px",
+          fontSize: 13, fontWeight: 700, textAlign: "center",
+          fontFamily: "Georgia, serif", letterSpacing: 0.3,
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+        }}>
+          <span style={{ fontSize: 16 }}>📡</span>
+          <span>Offline — changes saved locally, will sync when back online</span>
+        </div>
+      )}
 
       {profileOpen && (
         <div style={{
