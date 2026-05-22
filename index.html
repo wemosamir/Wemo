@@ -1453,6 +1453,7 @@ function Dashboard({ user, onLogout }) {
             cEditing={cEditing} saveClient={saveClient} cancelClient={cancelClient}
             knownSalespeople={knownSalespeople}
             previewBalance={previewBalance} previewProfit={previewProfit} showPreview={showPreview}
+            materialsPreview={materialsPreview}
             search={search} setSearch={setSearch}
             filter={filter} setFilter={setFilter}
             monthRows={monthRows} unpaidCount={unpaidCount}
@@ -2471,7 +2472,7 @@ function SalesTab(props) {
   const {
     cOpen, setCOpen, cForm, setCForm, cEditing, saveClient, cancelClient,
     knownSalespeople,
-    previewBalance, previewProfit, showPreview,
+    previewBalance, previewProfit, showPreview, materialsPreview,
     search, setSearch, filter, setFilter,
     monthRows, unpaidCount, visibleRows, selectedMonth,
     togglePaid, setViewingClient, monthTotals,
