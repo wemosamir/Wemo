@@ -509,6 +509,38 @@ function AuthScreen({ onLogin }) {
   const [error, setError] = useState("");
 
   const [busy, setBusy] = useState(false);
+  const [resetInfo, setResetInfo] = useState(""); // success message after sending reset email
+
+  const handleForgotPassword = async () => {
+    setError(""); setResetInfo("");
+    if (!email.trim()) {
+      setError("Enter your email above first, then tap 'Forgot password?'");
+      return;
+    }
+    if (!window.fbAuth) {
+      setError("Firebase not loaded — check internet & refresh.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await window.fbAuth.sendPasswordResetEmail(email.trim().toLowerCase());
+      setResetInfo(`📧 Reset link sent to ${email.trim().toLowerCase()}. Check your inbox (and spam folder).`);
+    } catch (err) {
+      console.error("[RESET] Failed:", err);
+      const code = err.code || "";
+      if (code === "auth/user-not-found") {
+        setError("No account found with that email.");
+      } else if (code === "auth/invalid-email") {
+        setError("That doesn't look like a valid email.");
+      } else if (code === "auth/network-request-failed") {
+        setError("Network error. Check your internet.");
+      } else {
+        setError("Could not send reset email: " + (err.message || code));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleLogin = async () => {
     setError("");
