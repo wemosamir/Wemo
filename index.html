@@ -1078,7 +1078,9 @@ function Dashboard({ user, onLogout }) {
   const totalsFor = (rows, pays, exps = []) => {
     const sales = rows.reduce((s, r) => s + num(r.sales), 0);
     const deposit = rows.reduce((s, r) => s + num(r.deposit), 0);
-    const balance = rows.reduce((s, r) => s + r.balance, 0);
+    // Outstanding balance = clients with balance > 0 AND not yet marked paid.
+    // Once you tap "Mark Paid" they're cleared even if the deposit field doesn't equal the sale.
+    const balance = rows.reduce((s, r) => s + ((!r.paid && r.balance > 0) ? r.balance : 0), 0);
     const cost = rows.reduce((s, r) => s + (r.materialsCost ?? num(r.cost)), 0);
     // Per-material breakdown (sums across rows)
     const matCurtains = rows.reduce((s, r) => s + num(r.curtainsCost), 0);
