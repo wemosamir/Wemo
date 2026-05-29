@@ -667,10 +667,14 @@ function AuthScreen({ onLogin }) {
           <div style={{ height: 12 }} />
           <Field label="Password"><TInput type="password" value={password} onChange={setPassword} placeholder="Your password" onKeyDown={e => { if (e.key === "Enter" && !busy) handleLogin(); }} /></Field>
           {error && <div style={{ marginTop: 14, padding: "10px 12px", background: "#fee2e2", border: "1px solid #fca5a5", borderRadius: 8, fontSize: 13, color: "#b91c1c", fontFamily: "sans-serif" }}>⚠️ {error}</div>}
+          {resetInfo && <div style={{ marginTop: 14, padding: "10px 12px", background: "#d1fae5", border: "1px solid #6ee7b7", borderRadius: 8, fontSize: 13, color: "#065f46", fontFamily: "sans-serif" }}>{resetInfo}</div>}
           <button onClick={handleLogin} disabled={busy} style={{ width: "100%", background: busy ? "#94a3b8" : "#dc2626", color: "#fff", border: "none", borderRadius: 10, padding: "13px", fontSize: 15, fontWeight: 700, cursor: busy ? "wait" : "pointer", fontFamily: "Georgia, serif", marginTop: 20 }}>{busy ? "Logging in..." : "Login"}</button>
-          <div style={{ textAlign: "center", marginTop: 18, fontSize: 13, color: "#64748b", fontFamily: "sans-serif" }}>
+          <div style={{ textAlign: "center", marginTop: 12, fontSize: 13, fontFamily: "sans-serif" }}>
+            <button onClick={handleForgotPassword} disabled={busy} style={{ background: "none", border: "none", color: "#dc2626", fontWeight: 600, cursor: busy ? "wait" : "pointer", fontFamily: "Georgia, serif", padding: "4px 0", fontSize: 13, textDecoration: "underline" }}>Forgot password?</button>
+          </div>
+          <div style={{ textAlign: "center", marginTop: 12, fontSize: 13, color: "#64748b", fontFamily: "sans-serif" }}>
             Don't have an account?{" "}
-            <button onClick={() => { setMode("signup"); setError(""); }} style={{ background: "none", border: "none", color: "#dc2626", fontWeight: 700, cursor: "pointer", fontFamily: "Georgia, serif", padding: 0, fontSize: 13 }}>Create one</button>
+            <button onClick={() => { setMode("signup"); setError(""); setResetInfo(""); }} style={{ background: "none", border: "none", color: "#dc2626", fontWeight: 700, cursor: "pointer", fontFamily: "Georgia, serif", padding: 0, fontSize: 13 }}>Create one</button>
           </div>
         </div>
       </div>
@@ -1121,6 +1125,12 @@ function Dashboard({ user, onLogout }) {
         r.category.toLowerCase().includes(q)
       );
     }
+    // Sort newest first: by date descending, then by id (which is timestamp-based) descending as tiebreaker
+    rows.sort((a, b) => {
+      const dateCmp = (b.date || "").localeCompare(a.date || "");
+      if (dateCmp !== 0) return dateCmp;
+      return (b.id || "").localeCompare(a.id || "");
+    });
     return rows;
   }, [monthRows, filter, search]);
 
@@ -2542,17 +2552,21 @@ function SalesTab(props) {
               <Field label="Category"><TSelect value={cForm.category} onChange={v => setCForm(f => ({ ...f, category: v }))}>{CATEGORIES.map(c => <option key={c}>{c}</option>)}</TSelect></Field>
               <Field label="Date"><TInput type="date" value={cForm.date} onChange={v => setCForm(f => ({ ...f, date: v }))} /></Field>
               <Field label="Salesperson" span={2}>
-                <TInput value={cForm.salesperson} onChange={v => setCForm(f => ({ ...f, salesperson: v }))} placeholder="e.g. Hassan" />
-                {knownSalespeople.length > 0 && !cForm.salesperson && (
-                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
-                    {knownSalespeople.map(sp => (
-                      <button key={sp} onClick={() => setCForm(f => ({ ...f, salesperson: sp }))} style={{
-                        fontSize: 11, padding: "3px 10px", borderRadius: 14,
-                        border: "1.5px solid #e2e8f0", background: "#fff",
-                        color: "#dc2626", cursor: "pointer", fontFamily: "Georgia, serif",
-                      }}>+ {sp}</button>
-                    ))}
-                  </div>
+                {knownSalespeople.length > 0 ? (
+                  <>
+                    <TSelect value={cForm.salesperson || ""} onChange={v => setCForm(f => ({ ...f, salesperson: v }))}>
+                      <option value="">— Select salesperson —</option>
+                      {knownSalespeople.map(sp => <option key={sp} value={sp}>{sp}</option>)}
+                      <option value="__new__">+ Add a new name</option>
+                    </TSelect>
+                    {cForm.salesperson === "__new__" && (
+                      <div style={{ marginTop: 8 }}>
+                        <TInput value="" onChange={v => setCForm(f => ({ ...f, salesperson: v }))} placeholder="Type new salesperson name" />
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <TInput value={cForm.salesperson} onChange={v => setCForm(f => ({ ...f, salesperson: v }))} placeholder="e.g. Hassan" />
                 )}
               </Field>
             </div>
