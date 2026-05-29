@@ -1345,6 +1345,7 @@ function Dashboard({ user, onLogout }) {
             { key: "categories", label: "📊 Categories" },
             { key: "staff", label: "👥 Staff" },
             { key: "expenses", label: "💸 Expenses" },
+            { key: "audit", label: "🔎 Audit" },
           ].map(t => (
             <button key={t.key} onClick={() => setTab(t.key)} style={{
               padding: "7px 14px", borderRadius: 20, border: "none", whiteSpace: "nowrap",
@@ -1424,7 +1425,7 @@ function Dashboard({ user, onLogout }) {
       />}
 
       <div style={{ padding: "16px", maxWidth: 700, margin: "0 auto" }}>
-        {(tab === "summary" || tab === "sales" || tab === "categories" || tab === "staff" || tab === "expenses") && (
+        {(tab === "summary" || tab === "sales" || tab === "categories" || tab === "staff" || tab === "expenses" || tab === "audit") && (
           <div style={{
             background: "#fff", borderRadius: 12, padding: "12px 14px",
             marginBottom: 14, boxShadow: "0 2px 8px rgba(15,23,42,0.06)",
@@ -1560,6 +1561,22 @@ function Dashboard({ user, onLogout }) {
             periodLabel={periodLabel} viewMode={viewMode}
             selectedDate={selectedDate}
             monthExpenses={monthExpenses}
+          />
+        )}
+
+        {tab === "audit" && (
+          <AuditTab
+            clients={allClientRows}
+            monthRows={monthRows}
+            monthPayments={monthPayments}
+            monthExpenses={monthExpenses}
+            monthTotals={monthTotals}
+            payments={payments}
+            expenses={expenses}
+            selectedMonth={selectedMonth}
+            selectedDate={selectedDate}
+            viewMode={viewMode}
+            periodLabel={periodLabel}
           />
         )}
       </div>
@@ -3377,6 +3394,299 @@ function PendingTab({ clients, togglePaid, toggleDelivered, setViewingClient }) 
               </div>
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── AUDIT TAB ─────────────────────────────────────────────────────────────────
+// Transparency tool: shows raw numbers and the math behind every total
+// ══════════════════════════════════════════════════════════════════════════════
+function AuditTab({ clients, monthRows, monthPayments, monthExpenses, monthTotals, payments, expenses, selectedMonth, selectedDate, viewMode, periodLabel }) {
+  const [section, setSection] = useState("monthly");
+  const [copied, setCopied] = useState(false);
+
+  // Compute net manually as a double-check
+  const checkProfit = (r) => {
+    const mat = num(r.curtainsCost) + num(r.sheersCost) + num(r.tapeHooksCost) + num(r.tapeRingsCost)
+      + num(r.ringsCost) + num(r.hooksCost) + num(r.rodsCost) + num(r.runnersCost) + num(r.railsCost);
+    const materials = mat > 0 ? mat : num(r.cost);
+    return num(r.sales) - materials - num(r.tailorCost) - num(r.transport) - num(r.allowance);
+  };
+
+  // Sum verify
+  const verify = {
+    sales: monthRows.reduce((s, r) => s + num(r.sales), 0),
+    materials: monthRows.reduce((s, r) => s + (r.materialsCost ?? num(r.cost)), 0),
+    tailor: monthRows.reduce((s, r) => s + num(r.tailorCost), 0),
+    transport: monthRows.reduce((s, r) => s + num(r.transport), 0),
+    allowance: monthRows.reduce((s, r) => s + num(r.allowance), 0),
+    profit: monthRows.reduce((s, r) => s + checkProfit(r), 0),
+    salaries: monthPayments.filter(p => p.type === "Salary").reduce((s, p) => s + num(p.amount), 0),
+    advances: monthPayments.filter(p => p.type === "Advance").reduce((s, p) => s + num(p.amount), 0),
+    expBusiness: monthExpenses.filter(e => e.forBusiness !== false).reduce((s, e) => s + num(e.amount), 0),
+    expPersonal: monthExpenses.filter(e => e.forBusiness === false).reduce((s, e) => s + num(e.amount), 0),
+    unpaidBalance: monthRows.reduce((s, r) => s + ((!r.paid && r.balance > 0) ? r.balance : 0), 0),
+  };
+  const expectedNet = verify.profit - verify.salaries - verify.advances - verify.expBusiness;
+
+  // Export everything as CSV-ish text
+  const exportData = () => {
+    const lines = [];
+    lines.push(`=== AUDIT EXPORT — ${periodLabel} ===`);
+    lines.push("");
+    lines.push("CLIENTS THIS PERIOD:");
+    lines.push("Date | Client | Sales | Deposit | Balance | Materials | Tailor | Transport | Allowance | Profit | Paid? | Delivered?");
+    monthRows.forEach(r => {
+      lines.push(`${r.date} | ${r.client} | ${num(r.sales)} | ${num(r.deposit)} | ${r.balance} | ${r.materialsCost ?? num(r.cost)} | ${num(r.tailorCost)} | ${num(r.transport)} | ${num(r.allowance)} | ${r.profit.toFixed(0)} | ${r.paid ? "YES" : "NO"} | ${r.delivered ? "YES" : "NO"}`);
+    });
+    lines.push("");
+    lines.push("PAYMENTS THIS PERIOD:");
+    lines.push("Date | Type | Amount | Note");
+    monthPayments.forEach(p => {
+      lines.push(`${p.date} | ${p.type} | ${num(p.amount)} | ${p.note || ""}`);
+    });
+    lines.push("");
+    lines.push("EXPENSES THIS PERIOD:");
+    lines.push("Date | Category | Amount | Business? | Note");
+    monthExpenses.forEach(e => {
+      lines.push(`${e.date} | ${e.category} | ${num(e.amount)} | ${e.forBusiness !== false ? "YES" : "NO"} | ${e.note || ""}`);
+    });
+    lines.push("");
+    lines.push("TOTALS:");
+    lines.push(`Total Sales: ${verify.sales}`);
+    lines.push(`Total Materials Cost: ${verify.materials}`);
+    lines.push(`Total Tailor Cost: ${verify.tailor}`);
+    lines.push(`Total Transport: ${verify.transport}`);
+    lines.push(`Total Allowance: ${verify.allowance}`);
+    lines.push(`Gross Profit: ${verify.profit.toFixed(0)}`);
+    lines.push(`Salaries Paid: ${verify.salaries}`);
+    lines.push(`Advances Given: ${verify.advances}`);
+    lines.push(`Business Expenses: ${verify.expBusiness}`);
+    lines.push(`Personal Expenses: ${verify.expPersonal}`);
+    lines.push(`NET PROFIT: ${expectedNet.toFixed(0)}`);
+    lines.push(`Outstanding Balance: ${verify.unpaidBalance}`);
+
+    const text = lines.join("\n");
+    try {
+      navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    } catch (e) {
+      alert("Copy failed. Here's the data:\n\n" + text);
+    }
+  };
+
+  const matches = (a, b) => Math.abs(a - b) < 1;
+  const Row = ({ label, value, formula, bold }) => (
+    <div style={{
+      padding: "10px 12px", borderTop: "1px solid #f1f5f9",
+      display: "flex", justifyContent: "space-between", alignItems: "flex-start",
+      gap: 12,
+    }}>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 13, fontWeight: bold ? 800 : 600, color: "#0f172a", fontFamily: "sans-serif" }}>{label}</div>
+        {formula && <div style={{ fontSize: 10, color: "#64748b", fontFamily: "monospace", marginTop: 3 }}>{formula}</div>}
+      </div>
+      <div style={{ fontSize: bold ? 16 : 14, fontWeight: bold ? 800 : 700, color: "#0f172a", whiteSpace: "nowrap" }}>{fmt(value)}</div>
+    </div>
+  );
+
+  return (
+    <div>
+      {/* Warning banner */}
+      <div style={{
+        background: "#fef3c7", border: "1.5px solid #fde68a", borderRadius: 12,
+        padding: "12px 14px", marginBottom: 14, fontFamily: "sans-serif",
+      }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "#92400e", marginBottom: 4 }}>🔎 Audit Mode — Raw Data View</div>
+        <div style={{ fontSize: 11, color: "#78350f", lineHeight: 1.5 }}>
+          Use this tab to verify the app's math. Take any number below, plug it into a calculator, confirm it matches. If a number looks wrong, screenshot it and tell me — I'll fix it.
+        </div>
+      </div>
+
+      {/* Section selector */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 14, background: "#f1f5f9", padding: 4, borderRadius: 8 }}>
+        {[
+          { key: "monthly", label: "📊 Totals" },
+          { key: "clients", label: "👤 Clients" },
+          { key: "payments", label: "💵 Pay" },
+          { key: "expenses", label: "💸 Exp" },
+        ].map(s => (
+          <button key={s.key} onClick={() => setSection(s.key)} style={{
+            flex: 1, padding: "7px 6px", border: "none", borderRadius: 6,
+            background: section === s.key ? "#0f172a" : "transparent",
+            color: section === s.key ? "#fff" : "#64748b",
+            fontWeight: 700, fontSize: 11, fontFamily: "Georgia, serif",
+            cursor: "pointer",
+          }}>{s.label}</button>
+        ))}
+      </div>
+
+      {/* Export button */}
+      <button onClick={exportData} style={{
+        width: "100%", background: copied ? "#10b981" : "#0f172a",
+        color: "#fff", border: "none", borderRadius: 10,
+        padding: "11px", fontSize: 13, fontWeight: 700, cursor: "pointer",
+        fontFamily: "Georgia, serif", marginBottom: 14,
+      }}>{copied ? "✅ Copied! Paste into a spreadsheet to verify" : "📋 Copy ALL data to clipboard (for spreadsheet check)"}</button>
+
+      {/* === MONTHLY TOTALS SECTION === */}
+      {section === "monthly" && (
+        <div style={{ background: "#fff", borderRadius: 12, overflow: "hidden", boxShadow: "0 2px 8px rgba(15,23,42,0.06)" }}>
+          <div style={{ background: "#0f172a", color: "#fff", padding: "12px 14px" }}>
+            <div style={{ fontSize: 13, fontWeight: 800 }}>📊 {periodLabel} — Step by Step</div>
+            <div style={{ fontSize: 10, opacity: 0.8, fontFamily: "sans-serif", marginTop: 2 }}>{monthRows.length} client entries</div>
+          </div>
+
+          <Row label="① Total Sales" value={verify.sales} formula={`Sum of sales from ${monthRows.length} clients`} bold />
+          <Row label="② Materials Cost" value={verify.materials} formula="Sum of all material costs" />
+          <Row label="③ Tailor Cost" value={verify.tailor} formula="Sum of tailor field" />
+          <Row label="④ Transport" value={verify.transport} formula="Sum of transport field" />
+          <Row label="⑤ Allowance" value={verify.allowance} formula="Sum of allowance field" />
+          <Row label="⑥ GROSS PROFIT" value={verify.profit} formula="① − ② − ③ − ④ − ⑤" bold />
+          <Row label="⑦ Salaries Paid" value={verify.salaries} formula="Sum of staff salary payments" />
+          <Row label="⑧ Advances Given" value={verify.advances} formula="Sum of staff advance payments" />
+          <Row label="⑨ Business Expenses" value={verify.expBusiness} formula="Sum of expenses where business = yes" />
+          <Row label="⑩ NET PROFIT" value={expectedNet} formula="⑥ − ⑦ − ⑧ − ⑨" bold />
+          <Row label="Personal Expenses (separate)" value={verify.expPersonal} formula="Not included in profit" />
+          <Row label="Outstanding Balance" value={verify.unpaidBalance} formula="Sum of balance where paid=NO" />
+
+          {/* Cross-check vs what app shows */}
+          <div style={{ background: "#f8fafc", padding: "12px 14px", marginTop: 8 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#64748b", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>✓ Cross-check vs App Display</div>
+            {[
+              { label: "Sales", a: verify.sales, b: monthTotals.sales },
+              { label: "Materials", a: verify.materials, b: monthTotals.cost },
+              { label: "Profit", a: verify.profit, b: monthTotals.profit },
+              { label: "Salaries", a: verify.salaries, b: monthTotals.salTotal },
+              { label: "Advances", a: verify.advances, b: monthTotals.advTotal },
+              { label: "Net", a: expectedNet, b: monthTotals.net },
+              { label: "Outstanding", a: verify.unpaidBalance, b: monthTotals.balance },
+            ].map(check => (
+              <div key={check.label} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, fontFamily: "monospace", padding: "3px 0" }}>
+                <span style={{ color: "#64748b" }}>{check.label}:</span>
+                <span style={{ color: matches(check.a, check.b) ? "#10b981" : "#ef4444", fontWeight: 700 }}>
+                  {matches(check.a, check.b) ? "✓ MATCH" : `✗ MISMATCH (audit ${fmt(check.a)} vs app ${fmt(check.b)})`}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* === CLIENTS LIST === */}
+      {section === "clients" && (
+        <div style={{ background: "#fff", borderRadius: 12, overflow: "hidden", boxShadow: "0 2px 8px rgba(15,23,42,0.06)" }}>
+          <div style={{ background: "#0f172a", color: "#fff", padding: "12px 14px" }}>
+            <div style={{ fontSize: 13, fontWeight: 800 }}>👤 Raw Client Entries — {periodLabel}</div>
+            <div style={{ fontSize: 10, opacity: 0.8, fontFamily: "sans-serif", marginTop: 2 }}>{monthRows.length} entries</div>
+          </div>
+          {monthRows.length === 0 ? (
+            <div style={{ padding: 30, textAlign: "center", color: "#94a3b8" }}>No client entries for this period.</div>
+          ) : (
+            monthRows.map(r => {
+              const expected = checkProfit(r);
+              const ok = matches(expected, r.profit);
+              return (
+                <div key={r.id} style={{ padding: "12px 14px", borderTop: "1px solid #f1f5f9", fontSize: 12, fontFamily: "monospace" }}>
+                  <div style={{ fontWeight: 700, fontSize: 14, fontFamily: "Georgia, serif", color: "#0f172a", marginBottom: 6 }}>
+                    {r.client} <span style={{ fontWeight: 400, color: "#94a3b8", fontSize: 11 }}>· {r.date}</span>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2px 12px", color: "#475569" }}>
+                    <span>Sales:</span><span style={{ textAlign: "right", color: "#0f172a", fontWeight: 700 }}>{fmt(num(r.sales))}</span>
+                    <span>Deposit:</span><span style={{ textAlign: "right", color: "#0f172a" }}>{fmt(num(r.deposit))}</span>
+                    <span>Balance:</span><span style={{ textAlign: "right", color: r.balance > 0 ? "#ef4444" : "#10b981" }}>{fmt(r.balance)}</span>
+                    <span>Materials:</span><span style={{ textAlign: "right" }}>{fmt(r.materialsCost ?? num(r.cost))}</span>
+                    <span>Tailor:</span><span style={{ textAlign: "right" }}>{fmt(num(r.tailorCost))}</span>
+                    <span>Transport:</span><span style={{ textAlign: "right" }}>{fmt(num(r.transport))}</span>
+                    <span>Allowance:</span><span style={{ textAlign: "right" }}>{fmt(num(r.allowance))}</span>
+                    <span style={{ fontWeight: 700, color: "#0f172a" }}>Profit:</span>
+                    <span style={{ textAlign: "right", fontWeight: 800, color: r.profit >= 0 ? "#10b981" : "#ef4444" }}>{fmt(r.profit)}</span>
+                  </div>
+                  <div style={{
+                    marginTop: 8, padding: "6px 8px", background: "#f8fafc",
+                    borderRadius: 6, fontSize: 10, color: "#64748b",
+                  }}>
+                    {fmt(num(r.sales))} − {fmt(r.materialsCost ?? num(r.cost))} − {fmt(num(r.tailorCost))} − {fmt(num(r.transport))} − {fmt(num(r.allowance))} = <strong style={{ color: ok ? "#10b981" : "#ef4444" }}>{fmt(expected)}</strong>
+                    {ok ? " ✓" : ` ✗ (shown: ${fmt(r.profit)})`}
+                  </div>
+                  <div style={{ marginTop: 6, fontSize: 10, color: "#94a3b8" }}>
+                    Paid: {r.paid ? "✅" : "❌"} · Delivered: {r.delivered ? "✅" : "❌"} · ID: {r.id?.slice(0, 8)}
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+
+      {/* === PAYMENTS === */}
+      {section === "payments" && (
+        <div style={{ background: "#fff", borderRadius: 12, overflow: "hidden", boxShadow: "0 2px 8px rgba(15,23,42,0.06)" }}>
+          <div style={{ background: "#0f172a", color: "#fff", padding: "12px 14px" }}>
+            <div style={{ fontSize: 13, fontWeight: 800 }}>💵 Staff Payments — {periodLabel}</div>
+            <div style={{ fontSize: 10, opacity: 0.8, fontFamily: "sans-serif", marginTop: 2 }}>{monthPayments.length} payments</div>
+          </div>
+          {monthPayments.length === 0 ? (
+            <div style={{ padding: 30, textAlign: "center", color: "#94a3b8" }}>No payments for this period.</div>
+          ) : (
+            monthPayments.map(p => (
+              <div key={p.id} style={{ padding: "10px 14px", borderTop: "1px solid #f1f5f9", display: "flex", justifyContent: "space-between", fontSize: 13, fontFamily: "monospace" }}>
+                <div>
+                  <span style={{ color: "#0f172a", fontWeight: 700 }}>{p.type}</span>
+                  <span style={{ color: "#94a3b8", marginLeft: 8 }}>· {p.date}</span>
+                  {p.note && <div style={{ fontSize: 10, color: "#64748b", marginTop: 2 }}>{p.note}</div>}
+                </div>
+                <div style={{ fontWeight: 700, color: p.type === "Salary" ? "#7c3aed" : "#be185d" }}>{fmt(num(p.amount))}</div>
+              </div>
+            ))
+          )}
+          <div style={{ background: "#0f172a", color: "#fff", padding: "12px 14px", fontSize: 13, fontFamily: "monospace", display: "flex", justifyContent: "space-between" }}>
+            <span>TOTAL:</span>
+            <span style={{ fontWeight: 800 }}>{fmt(verify.salaries + verify.advances)}</span>
+          </div>
+        </div>
+      )}
+
+      {/* === EXPENSES === */}
+      {section === "expenses" && (
+        <div style={{ background: "#fff", borderRadius: 12, overflow: "hidden", boxShadow: "0 2px 8px rgba(15,23,42,0.06)" }}>
+          <div style={{ background: "#0f172a", color: "#fff", padding: "12px 14px" }}>
+            <div style={{ fontSize: 13, fontWeight: 800 }}>💸 Expenses — {periodLabel}</div>
+            <div style={{ fontSize: 10, opacity: 0.8, fontFamily: "sans-serif", marginTop: 2 }}>{monthExpenses.length} entries</div>
+          </div>
+          {monthExpenses.length === 0 ? (
+            <div style={{ padding: 30, textAlign: "center", color: "#94a3b8" }}>No expenses for this period.</div>
+          ) : (
+            monthExpenses.map(e => (
+              <div key={e.id} style={{ padding: "10px 14px", borderTop: "1px solid #f1f5f9", display: "flex", justifyContent: "space-between", fontSize: 13, fontFamily: "monospace" }}>
+                <div>
+                  <span style={{ color: "#0f172a", fontWeight: 700 }}>{e.category}</span>
+                  <span style={{ color: "#94a3b8", marginLeft: 8 }}>· {e.date}</span>
+                  <span style={{ fontSize: 10, padding: "1px 6px", background: e.forBusiness !== false ? "#fee2e2" : "#dbeafe", color: e.forBusiness !== false ? "#991b1b" : "#1e40af", borderRadius: 3, marginLeft: 6, fontWeight: 700 }}>
+                    {e.forBusiness !== false ? "BUSINESS" : "PERSONAL"}
+                  </span>
+                  {e.note && <div style={{ fontSize: 10, color: "#64748b", marginTop: 2 }}>{e.note}</div>}
+                </div>
+                <div style={{ fontWeight: 700, color: "#be185d" }}>{fmt(num(e.amount))}</div>
+              </div>
+            ))
+          )}
+          <div style={{ background: "#0f172a", color: "#fff", padding: "12px 14px", fontFamily: "monospace" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+              <span>Business:</span><span style={{ fontWeight: 700 }}>{fmt(verify.expBusiness)}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginTop: 4 }}>
+              <span>Personal:</span><span style={{ fontWeight: 700 }}>{fmt(verify.expPersonal)}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginTop: 6, paddingTop: 6, borderTop: "1px solid #475569" }}>
+              <span>TOTAL:</span><span style={{ fontWeight: 800 }}>{fmt(verify.expBusiness + verify.expPersonal)}</span>
+            </div>
+          </div>
         </div>
       )}
     </div>
