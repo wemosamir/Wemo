@@ -215,22 +215,40 @@ function generateInviteCode() {
 // Sign up: create Firebase Auth account + write user profile doc.
 // If inviteCode is provided, this user becomes a HELPER linked to whoever owns that code.
 async function fbSignup(email, password, shopName, inviteCode) {
-  // If they entered an invite code, first verify it exists by finding the owner
+  const wantsHelper = !!(inviteCode && inviteCode.trim());
+  const code = wantsHelper ? inviteCode.trim().toUpperCase() : null;
+
+  // STEP 1: Create the Firebase Auth account FIRST.
+  // This is required because Firestore security rules need request.auth to be set
+  // before we can query the users collection. Without this, the invite-code lookup
+  // fails with "Missing or insufficient permissions".
+  const cred = await window.fbAuth.createUserWithEmailAndPassword(email.trim().toLowerCase(), password);
+
+  // STEP 2: Now (logged in) try to look up the owner by invite code, if provided.
   let ownerUID = null;
   let ownerShopName = "";
-  if (inviteCode && inviteCode.trim()) {
-    const code = inviteCode.trim().toUpperCase();
-    // Look up owner by invite code
-    const snap = await window.fbDB.collection("users").where("inviteCode", "==", code).limit(1).get();
-    if (snap.empty) {
-      throw new Error("Invalid invite code. Check with the shop owner.");
+  if (wantsHelper) {
+    try {
+      const snap = await window.fbDB.collection("users").where("inviteCode", "==", code).limit(1).get();
+      if (snap.empty) {
+        // Roll back: delete the auth account we just created so user can try again
+        try { await cred.user.delete(); } catch (e) {}
+        throw new Error("Invalid invite code. Check with the shop owner.");
+      }
+      const ownerDoc = snap.docs[0];
+      ownerUID = ownerDoc.id;
+      ownerShopName = ownerDoc.data().shopName || "Shop";
+    } catch (e) {
+      // Roll back the auth account if invite lookup fails for any reason
+      if (!ownerUID) {
+        try { await cred.user.delete(); } catch (err) {}
+        if (e.message && e.message.includes("Invalid invite code")) throw e;
+        throw new Error("Could not verify invite code. Check internet & try again.");
+      }
     }
-    const ownerDoc = snap.docs[0];
-    ownerUID = ownerDoc.id;
-    ownerShopName = ownerDoc.data().shopName || "Shop";
   }
 
-  const cred = await window.fbAuth.createUserWithEmailAndPassword(email.trim().toLowerCase(), password);
+  // STEP 3: Write the user profile to Firestore
   const profile = {
     email: cred.user.email,
     shopName: ownerUID ? ownerShopName + " (Helper)" : shopName.trim(),
