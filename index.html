@@ -116,7 +116,7 @@ const EMPTY_CLIENT = {
   category: "Curtains", salesperson: "",
   sales: "", deposit: "",
   cost: "", // legacy total — kept for old entries; new entries use itemized below
-  curtainsCost: "", sheersCost: "", tapeHooksCost: "", tapeRingsCost: "",
+  curtainsCost: "", sheersCost: "", blindsCost: "", tapeHooksCost: "", tapeRingsCost: "",
   ringsCost: "", hooksCost: "", rodsCost: "", runnersCost: "", railsCost: "",
   tailorCost: "", transport: "", allowance: "",
   measurements: "", productDetails: "",
@@ -1030,7 +1030,7 @@ function Dashboard({ user, onLogout }) {
   // Sum all itemized material costs into a single number.
   // If only the legacy `cost` field is filled (old entries), fall back to that.
   const materialsTotal = (c) => {
-    const itemized = num(c.curtainsCost) + num(c.sheersCost) + num(c.tapeHooksCost) + num(c.tapeRingsCost)
+    const itemized = num(c.curtainsCost) + num(c.sheersCost) + num(c.blindsCost) + num(c.tapeHooksCost) + num(c.tapeRingsCost)
       + num(c.ringsCost) + num(c.hooksCost) + num(c.rodsCost) + num(c.runnersCost) + num(c.railsCost);
     return itemized > 0 ? itemized : num(c.cost);
   };
@@ -1164,6 +1164,7 @@ function Dashboard({ user, onLogout }) {
     // Per-material breakdown (sums across rows)
     const matCurtains = rows.reduce((s, r) => s + num(r.curtainsCost), 0);
     const matSheers = rows.reduce((s, r) => s + num(r.sheersCost), 0);
+    const matBlinds = rows.reduce((s, r) => s + num(r.blindsCost), 0);
     const matTapeHooks = rows.reduce((s, r) => s + num(r.tapeHooksCost), 0);
     const matTapeRings = rows.reduce((s, r) => s + num(r.tapeRingsCost), 0);
     const matRings = rows.reduce((s, r) => s + num(r.ringsCost), 0);
@@ -1182,7 +1183,7 @@ function Dashboard({ user, onLogout }) {
     const expTotal = expBusiness + expPersonal;
     return {
       sales, deposit, balance, cost, tailorCost, transport, allowance, profit,
-      matCurtains, matSheers, matTapeHooks, matTapeRings, matRings, matHooks, matRods, matRunners, matRails,
+      matCurtains, matSheers, matBlinds, matTapeHooks, matTapeRings, matRings, matHooks, matRods, matRunners, matRails,
       salTotal, advTotal, staffTotal: salTotal + advTotal,
       expBusiness, expPersonal, expTotal,
       net: profit - salTotal - advTotal - expBusiness, count: rows.length,
@@ -1367,7 +1368,7 @@ function Dashboard({ user, onLogout }) {
 
   const today = new Date().toLocaleDateString("en-KE", { day: "numeric", month: "long", year: "numeric" });
   const previewBalance = Math.max(0, num(cForm.sales) - num(cForm.deposit));
-  const materialsPreview = num(cForm.curtainsCost) + num(cForm.sheersCost) + num(cForm.tapeHooksCost)
+  const materialsPreview = num(cForm.curtainsCost) + num(cForm.sheersCost) + num(cForm.blindsCost) + num(cForm.tapeHooksCost)
     + num(cForm.tapeRingsCost) + num(cForm.ringsCost) + num(cForm.hooksCost)
     + num(cForm.rodsCost) + num(cForm.runnersCost) + num(cForm.railsCost);
   const effectiveMaterials = materialsPreview > 0 ? materialsPreview : num(cForm.cost);
@@ -2285,7 +2286,7 @@ function ClientDetailModal({ client, onClose, onEdit, onDelete, onReorder, clien
   const ledgerPaid = myPayments.reduce((s, p) => s + num(p.amount), 0);
 
   // Compute these locally so the modal works whether passed a raw or decorated client.
-  const itemizedMaterials = num(client.curtainsCost) + num(client.sheersCost) + num(client.tapeHooksCost)
+  const itemizedMaterials = num(client.curtainsCost) + num(client.sheersCost) + num(client.blindsCost) + num(client.tapeHooksCost)
     + num(client.tapeRingsCost) + num(client.ringsCost) + num(client.hooksCost)
     + num(client.rodsCost) + num(client.runnersCost) + num(client.railsCost);
   const materialsCost = itemizedMaterials > 0 ? itemizedMaterials : num(client.cost);
@@ -2520,6 +2521,7 @@ function ClientDetailModal({ client, onClose, onEdit, onDelete, onReorder, clien
                   {[
                     { label: "🪟 Curtains", value: client.curtainsCost },
                     { label: "🌫️ Sheers", value: client.sheersCost },
+                    { label: "🪟 Blinds", value: client.blindsCost },
                     { label: "🪝 Tape Hooks", value: client.tapeHooksCost },
                     { label: "⭕ Tape Rings", value: client.tapeRingsCost },
                     { label: "🔗 Rings", value: client.ringsCost },
@@ -2534,7 +2536,7 @@ function ClientDetailModal({ client, onClose, onEdit, onDelete, onReorder, clien
                     </div>
                   ))}
                   {/* Legacy fallback for old entries (only the lump Product Cost was filled) */}
-                  {num(client.cost) > 0 && [client.curtainsCost, client.sheersCost, client.tapeHooksCost, client.tapeRingsCost, client.ringsCost, client.hooksCost, client.rodsCost, client.runnersCost, client.railsCost].every(v => !num(v)) && (
+                  {num(client.cost) > 0 && [client.curtainsCost, client.sheersCost, client.blindsCost, client.tapeHooksCost, client.tapeRingsCost, client.ringsCost, client.hooksCost, client.rodsCost, client.runnersCost, client.railsCost].every(v => !num(v)) && (
                     <div style={{ display: "flex", justifyContent: "space-between" }}>
                       <span style={{ color: "#64748b" }}>Product Cost (legacy)</span>
                       <span style={{ fontWeight: 700, color: "#0f172a" }}>{fmt(num(client.cost))}</span>
@@ -2836,6 +2838,7 @@ function SalesTab(props) {
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
               <Field label="🪟 Curtains (KSh)"><TInput type="number" value={cForm.curtainsCost} onChange={v => setCForm(f => ({ ...f, curtainsCost: v }))} placeholder="0" /></Field>
               <Field label="🌫️ Sheers (KSh)"><TInput type="number" value={cForm.sheersCost} onChange={v => setCForm(f => ({ ...f, sheersCost: v }))} placeholder="0" /></Field>
+              <Field label="🪟 Blinds (KSh)" span={2}><TInput type="number" value={cForm.blindsCost} onChange={v => setCForm(f => ({ ...f, blindsCost: v }))} placeholder="0" /></Field>
               <Field label="🪝 Tape Hooks (KSh)"><TInput type="number" value={cForm.tapeHooksCost} onChange={v => setCForm(f => ({ ...f, tapeHooksCost: v }))} placeholder="0" /></Field>
               <Field label="⭕ Tape Rings (KSh)"><TInput type="number" value={cForm.tapeRingsCost} onChange={v => setCForm(f => ({ ...f, tapeRingsCost: v }))} placeholder="0" /></Field>
               <Field label="🔗 Rings (KSh)"><TInput type="number" value={cForm.ringsCost} onChange={v => setCForm(f => ({ ...f, ringsCost: v }))} placeholder="0" /></Field>
@@ -3142,6 +3145,7 @@ function MonthlySummary({ monthTotals, prevTotals, selectedMonth, prevMonthKey, 
               { label: "Materials Total", value: monthTotals.cost, color: "#ef4444", strong: true, neg: true },
               ...(monthTotals.matCurtains > 0 ? [{ label: "  🪟 Curtains", value: monthTotals.matCurtains, color: "#ef4444", neg: true, indent: true }] : []),
               ...(monthTotals.matSheers > 0 ? [{ label: "  🌫️ Sheers", value: monthTotals.matSheers, color: "#ef4444", neg: true, indent: true }] : []),
+              ...(monthTotals.matBlinds > 0 ? [{ label: "  🪟 Blinds", value: monthTotals.matBlinds, color: "#ef4444", neg: true, indent: true }] : []),
               ...(monthTotals.matTapeHooks > 0 ? [{ label: "  🪝 Tape Hooks", value: monthTotals.matTapeHooks, color: "#ef4444", neg: true, indent: true }] : []),
               ...(monthTotals.matTapeRings > 0 ? [{ label: "  ⭕ Tape Rings", value: monthTotals.matTapeRings, color: "#ef4444", neg: true, indent: true }] : []),
               ...(monthTotals.matRings > 0 ? [{ label: "  🔗 Rings", value: monthTotals.matRings, color: "#ef4444", neg: true, indent: true }] : []),
@@ -3643,7 +3647,7 @@ function AuditTab({ clients, monthRows, monthPayments, monthExpenses, monthClien
 
   // Compute net manually as a double-check
   const checkProfit = (r) => {
-    const mat = num(r.curtainsCost) + num(r.sheersCost) + num(r.tapeHooksCost) + num(r.tapeRingsCost)
+    const mat = num(r.curtainsCost) + num(r.sheersCost) + num(r.blindsCost) + num(r.tapeHooksCost) + num(r.tapeRingsCost)
       + num(r.ringsCost) + num(r.hooksCost) + num(r.rodsCost) + num(r.runnersCost) + num(r.railsCost);
     const materials = mat > 0 ? mat : num(r.cost);
     return num(r.sales) - materials - num(r.tailorCost) - num(r.transport) - num(r.allowance);
