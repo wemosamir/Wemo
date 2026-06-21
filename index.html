@@ -186,26 +186,6 @@ function compressImage(file, maxWidth = 1000, quality = 0.75) {
 // Login with Firebase Auth (email + password)
 async function fbLogin(email, password) {
   const cred = await window.fbAuth.signInWithEmailAndPassword(email.trim().toLowerCase(), password);
-  // Try to fetch user profile from Firestore with a 5-second timeout.
-  // If Firestore is blocked/slow, still complete the login on Auth alone.
-  try {
-    const userDoc = await Promise.race([
-      window.fbDB.collection("users").doc(cred.user.uid).get(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("profile fetch timeout")), 3000))
-    ]);
-    if (userDoc.exists) {
-      return { uid: cred.user.uid, email: cred.user.email, ...userDoc.data() };
-    }
-  } catch (e) {
-    console.warn("Profile fetch failed, continuing with default:", e.message);
-  }
-  // Fallback if Firestore unavailable or profile missing
-  return { uid: cred.user.uid, email: cred.user.email, shopName: "My Shop" };
-}
-
-// Sign up: create Firebase Auth account + write user profile doc
-async function fbLogin(email, password) {
-  const cred = await window.fbAuth.signInWithEmailAndPassword(email.trim().toLowerCase(), password);
   const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("profile fetch timeout")), 3000));
   let userDoc;
   try {
