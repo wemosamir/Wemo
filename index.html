@@ -131,6 +131,10 @@ const EMPTY_STAFF = { id: "", name: "", role: "", phone: "", idNumber: "", natio
 // Each transaction tracks salary payments OR advance payments tied to a staff
 const EMPTY_PAYMENT = { id: "", staffId: "", type: "Advance", amount: "", date: todayISO(), note: "" };
 
+// Each client payment is a single money-in event. Multiple per client over time.
+const EMPTY_CLIENT_PAYMENT = { id: "", clientId: "", amount: "", date: todayISO(), method: "Cash", note: "" };
+const PAYMENT_METHODS = ["Cash", "M-Pesa", "Bank Transfer", "Cheque", "Other"];
+
 // Expense categories (covers business + personal)
 const EXPENSE_CATEGORIES = [
   { value: "Shop Rent", emoji: "🏪", color: "#dc2626" },
@@ -219,10 +223,10 @@ async function fbLogout() {
 // Subscribe to real-time data updates for a user. Returns an unsubscribe function.
 function subscribeUserData(uid, onData) {
   if (!uid) return () => {};
-  let clients = [], staff = [], payments = [], expenses = [];
-  let ready = { c: false, s: false, p: false, e: false };
+  let clients = [], staff = [], payments = [], expenses = [], clientPayments = [];
+  let ready = { c: false, s: false, p: false, e: false, cp: false };
   const tryEmit = () => {
-    if (ready.c && ready.s && ready.p && ready.e) onData({ clients, staff, payments, expenses });
+    if (ready.c && ready.s && ready.p && ready.e && ready.cp) onData({ clients, staff, payments, expenses, clientPayments });
   };
   const userRef = window.fbDB.collection("users").doc(uid);
   const unsubC = userRef.collection("clients").onSnapshot(
@@ -253,7 +257,14 @@ function subscribeUserData(uid, onData) {
     },
     err => { console.error("[FIRESTORE] expenses listener error:", err.code, err.message); }
   );
-  return () => { unsubC(); unsubS(); unsubP(); unsubE(); };
+  const unsubCP = userRef.collection("clientPayments").onSnapshot(
+    snap => {
+      clientPayments = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      ready.cp = true; tryEmit();
+    },
+    err => { console.error("[FIRESTORE] clientPayments listener error:", err.code, err.message); }
+  );
+  return () => { unsubC(); unsubS(); unsubP(); unsubE(); unsubCP(); };
 }
 
 // Save a single client (create or update). The doc id is the client's id field.
@@ -299,6 +310,17 @@ async function fbSaveExpense(uid, e) {
 async function fbDeleteExpense(uid, expenseId) {
   if (!uid || !expenseId) return;
   await window.fbDB.collection("users").doc(uid).collection("expenses").doc(expenseId).delete();
+}
+
+// Save / delete client payments (the new payment ledger)
+async function fbSaveClientPayment(uid, cp) {
+  if (!uid || !cp?.id) return;
+  const { id, ...data } = cp;
+  await window.fbDB.collection("users").doc(uid).collection("clientPayments").doc(id).set(data);
+}
+async function fbDeleteClientPayment(uid, cpId) {
+  if (!uid || !cpId) return;
+  await window.fbDB.collection("users").doc(uid).collection("clientPayments").doc(cpId).delete();
 }
 
 function monthKey(dateStr) {
@@ -843,6 +865,7 @@ function Dashboard({ user, onLogout }) {
   const [staff, setStaff] = useState([]);
   const [payments, setPayments] = useState([]);
   const [expenses, setExpenses] = useState([]);
+  const [clientPayments, setClientPayments] = useState([]);
   const [dataReady, setDataReady] = useState(false);
   const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
 
@@ -861,11 +884,12 @@ function Dashboard({ user, onLogout }) {
   // Subscribe to Firestore for real-time updates from any device
   useEffect(() => {
     if (!user?.uid) return;
-    const unsub = subscribeUserData(user.uid, ({ clients, staff, payments, expenses }) => {
+    const unsub = subscribeUserData(user.uid, ({ clients, staff, payments, expenses, clientPayments }) => {
       setClients(clients);
       setStaff(staff);
       setPayments(payments);
       setExpenses(expenses || []);
+      setClientPayments(clientPayments || []);
       setDataReady(true);
     });
     return () => unsub();
@@ -953,6 +977,25 @@ function Dashboard({ user, onLogout }) {
       return next;
     });
   };
+  const setClientPaymentsWithSync = (updater) => {
+    setClientPayments(prev => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      const prevById = new Map(prev.map(p => [p.id, p]));
+      const nextById = new Map(next.map(p => [p.id, p]));
+      next.forEach(p => {
+        const old = prevById.get(p.id);
+        if (!old || JSON.stringify(old) !== JSON.stringify(p)) {
+          fbSaveClientPayment(user.uid, p).catch(err => console.error("Save client payment failed", err));
+        }
+      });
+      prev.forEach(p => {
+        if (!nextById.has(p.id)) {
+          fbDeleteClientPayment(user.uid, p.id).catch(err => console.error("Delete client payment failed", err));
+        }
+      });
+      return next;
+    });
+  };
 
   const [selectedMonth, setSelectedMonth] = useState(() => todayISO().slice(0, 7));
   const [viewMode, setViewMode] = useState("month"); // "month" or "day"
@@ -992,14 +1035,31 @@ function Dashboard({ user, onLogout }) {
     return itemized > 0 ? itemized : num(c.cost);
   };
 
-  const allClientRows = clients.map(c => ({
-    ...c,
-    photos: c.photos || [],
-    balance: Math.max(0, num(c.sales) - num(c.deposit)),
-    materialsCost: materialsTotal(c),
-    profit: num(c.sales) - materialsTotal(c) - num(c.tailorCost) - num(c.transport) - num(c.allowance),
-    monthKey: monthKey(c.date),
-  }));
+  // Build a map: clientId -> total of all payments logged for that client
+  const paymentTotalByClient = useMemo(() => {
+    const map = new Map();
+    clientPayments.forEach(p => {
+      const cid = p.clientId;
+      if (!cid) return;
+      map.set(cid, (map.get(cid) || 0) + num(p.amount));
+    });
+    return map;
+  }, [clientPayments]);
+
+  const allClientRows = clients.map(c => {
+    const ledgerPaid = paymentTotalByClient.get(c.id) || 0;
+    const totalReceived = num(c.deposit) + ledgerPaid;
+    return {
+      ...c,
+      photos: c.photos || [],
+      ledgerPaid,           // sum of payment-log entries only
+      totalReceived,        // deposit + all logged payments
+      balance: Math.max(0, num(c.sales) - totalReceived),
+      materialsCost: materialsTotal(c),
+      profit: num(c.sales) - materialsTotal(c) - num(c.tailorCost) - num(c.transport) - num(c.allowance),
+      monthKey: monthKey(c.date),
+    };
+  });
 
   const knownSalespeople = useMemo(() => {
     const set = new Set();
@@ -1070,6 +1130,25 @@ function Dashboard({ user, onLogout }) {
     if (viewMode === "day") return expenses.filter(e => e.date === selectedDate);
     return expenses.filter(e => monthKey(e.date) === selectedMonth);
   }, [expenses, selectedMonth, selectedDate, viewMode]);
+
+  // Cash received from clients this period (payments logged with this period's date)
+  const monthClientPayments = useMemo(() => {
+    if (viewMode === "day") return clientPayments.filter(p => p.date === selectedDate);
+    return clientPayments.filter(p => monthKey(p.date) === selectedMonth);
+  }, [clientPayments, selectedMonth, selectedDate, viewMode]);
+
+  // Also include deposits paid this period (the initial deposit when sale was created
+  // is "cash received" on the sale's date — so a deposit IS a payment for that period).
+  const monthDeposits = useMemo(() => {
+    if (viewMode === "day") return allClientRows.filter(r => r.date === selectedDate && num(r.deposit) > 0);
+    return allClientRows.filter(r => r.monthKey === selectedMonth && num(r.deposit) > 0);
+  }, [allClientRows, selectedMonth, selectedDate, viewMode]);
+
+  const cashReceivedThisMonth = useMemo(() => {
+    const fromPayments = monthClientPayments.reduce((s, p) => s + num(p.amount), 0);
+    const fromDeposits = monthDeposits.reduce((s, r) => s + num(r.deposit), 0);
+    return fromPayments + fromDeposits;
+  }, [monthClientPayments, monthDeposits]);
 
   // Friendly label for current period — used in headers across tabs
   const periodLabel = viewMode === "day" ? formatDateNice(selectedDate) : formatMonthKey(selectedMonth);
@@ -1407,7 +1486,16 @@ function Dashboard({ user, onLogout }) {
         </div>
       )}
 
-      {viewingClient && <ClientDetailModal client={viewingClient} onClose={() => setViewingClient(null)} onEdit={() => editClient(viewingClient)} onDelete={() => deleteClient(viewingClient.id)} onReorder={() => reorderForClient(viewingClient)} />}
+      {viewingClient && <ClientDetailModal
+        client={viewingClient}
+        onClose={() => setViewingClient(null)}
+        onEdit={() => editClient(viewingClient)}
+        onDelete={() => deleteClient(viewingClient.id)}
+        onReorder={() => reorderForClient(viewingClient)}
+        clientPayments={clientPayments}
+        onAddPayment={(p) => setClientPaymentsWithSync(prev => [p, ...prev])}
+        onDeletePayment={(id) => setClientPaymentsWithSync(prev => prev.filter(x => x.id !== id))}
+      />}
 
       {viewingStaff && <StaffDetailModal
         staff={viewingStaff}
@@ -1489,6 +1577,8 @@ function Dashboard({ user, onLogout }) {
             monthCategoryTotals={monthCategoryTotals} setTab={setTab}
             periodLabel={periodLabel} viewMode={viewMode}
             monthExpenses={monthExpenses}
+            cashReceivedThisMonth={cashReceivedThisMonth}
+            monthClientPayments={monthClientPayments}
           />
         )}
 
@@ -1570,9 +1660,12 @@ function Dashboard({ user, onLogout }) {
             monthRows={monthRows}
             monthPayments={monthPayments}
             monthExpenses={monthExpenses}
+            monthClientPayments={monthClientPayments}
+            cashReceivedThisMonth={cashReceivedThisMonth}
             monthTotals={monthTotals}
             payments={payments}
             expenses={expenses}
+            clientPayments={clientPayments}
             selectedMonth={selectedMonth}
             selectedDate={selectedDate}
             viewMode={viewMode}
@@ -2177,18 +2270,46 @@ function StaffTab({
 // ══════════════════════════════════════════════════════════════════════════════
 // ── CLIENT DETAIL MODAL ──────────────────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════════
-function ClientDetailModal({ client, onClose, onEdit, onDelete, onReorder }) {
+function ClientDetailModal({ client, onClose, onEdit, onDelete, onReorder, clientPayments, onAddPayment, onDeletePayment }) {
   const [previewPhoto, setPreviewPhoto] = useState(null);
+  const [showPayForm, setShowPayForm] = useState(false);
+  const [payAmount, setPayAmount] = useState("");
+  const [payDate, setPayDate] = useState(todayISO());
+  const [payMethod, setPayMethod] = useState("Cash");
+  const [payNote, setPayNote] = useState("");
+
+  // Filter payments for THIS client only, sorted newest first
+  const myPayments = (clientPayments || [])
+    .filter(p => p.clientId === client.id)
+    .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const ledgerPaid = myPayments.reduce((s, p) => s + num(p.amount), 0);
+
   // Compute these locally so the modal works whether passed a raw or decorated client.
   const itemizedMaterials = num(client.curtainsCost) + num(client.sheersCost) + num(client.tapeHooksCost)
     + num(client.tapeRingsCost) + num(client.ringsCost) + num(client.hooksCost)
     + num(client.rodsCost) + num(client.runnersCost) + num(client.railsCost);
   const materialsCost = itemizedMaterials > 0 ? itemizedMaterials : num(client.cost);
-  const balance = client.balance != null ? client.balance : Math.max(0, num(client.sales) - num(client.deposit));
-  const profit = client.profit != null ? client.profit : num(client.sales) - materialsCost - num(client.tailorCost) - num(client.transport) - num(client.allowance);
-  client = { ...client, materialsCost, balance, profit };
+  const totalReceived = num(client.deposit) + ledgerPaid;
+  const balance = Math.max(0, num(client.sales) - totalReceived);
+  const profit = num(client.sales) - materialsCost - num(client.tailorCost) - num(client.transport) - num(client.allowance);
+  client = { ...client, materialsCost, balance, profit, totalReceived, ledgerPaid };
   const fullyPaid = client.paid || (num(client.sales) > 0 && client.balance <= 0);
   const photos = client.photos || [];
+
+  const handleAddPayment = () => {
+    const amt = num(payAmount);
+    if (amt <= 0) { alert("Enter a payment amount greater than 0"); return; }
+    if (!onAddPayment) return;
+    onAddPayment({
+      id: uid(),
+      clientId: client.id,
+      amount: amt,
+      date: payDate || todayISO(),
+      method: payMethod,
+      note: payNote.trim(),
+    });
+    setPayAmount(""); setPayMethod("Cash"); setPayNote(""); setPayDate(todayISO()); setShowPayForm(false);
+  };
 
   return (
     <div style={{
@@ -2287,10 +2408,106 @@ function ClientDetailModal({ client, onClose, onEdit, onDelete, onReorder }) {
           <Section title="💰 Money">
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               <MoneyBox label="Sales" value={fmt(client.sales)} color="#dc2626" />
-              <MoneyBox label="Deposit" value={fmt(client.deposit)} color="#10b981" />
+              <MoneyBox label="Total Received" value={fmt(client.totalReceived)} color="#10b981" />
               <MoneyBox label="Balance" value={fmt(client.balance)} color={client.balance > 0 ? "#f59e0b" : "#10b981"} />
               <MoneyBox label="Profit" value={fmt(client.profit)} color={client.profit >= 0 ? "#10b981" : "#ef4444"} />
             </div>
+          </Section>
+
+          {/* PAYMENT LEDGER */}
+          <Section title={`💵 Payment History (${myPayments.length + (num(client.deposit) > 0 ? 1 : 0)})`}>
+            {/* Initial deposit shown as the first payment */}
+            {num(client.deposit) > 0 && (
+              <div style={{
+                background: "#f0fdf4", border: "1.5px solid #86efac",
+                borderRadius: 10, padding: "10px 12px", marginBottom: 8,
+                display: "flex", justifyContent: "space-between", alignItems: "center",
+              }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#15803d", fontFamily: "Georgia, serif" }}>Initial Deposit</div>
+                  <div style={{ fontSize: 10, color: "#64748b", fontFamily: "sans-serif", marginTop: 2 }}>{client.date} · Recorded with sale</div>
+                </div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: "#10b981" }}>{fmt(num(client.deposit))}</div>
+              </div>
+            )}
+
+            {/* Logged top-up payments */}
+            {myPayments.map(p => (
+              <div key={p.id} style={{
+                background: "#fff", border: "1.5px solid #e2e8f0",
+                borderRadius: 10, padding: "10px 12px", marginBottom: 8,
+                display: "flex", justifyContent: "space-between", alignItems: "center",
+              }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#0f172a", fontFamily: "Georgia, serif" }}>
+                    {p.method || "Payment"}
+                  </div>
+                  <div style={{ fontSize: 10, color: "#64748b", fontFamily: "sans-serif", marginTop: 2 }}>
+                    {p.date}{p.note ? ` · ${p.note}` : ""}
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: "#10b981" }}>{fmt(num(p.amount))}</div>
+                  {onDeletePayment && (
+                    <button onClick={() => { if (window.confirm("Delete this payment?")) onDeletePayment(p.id); }} style={{
+                      background: "#fee2e2", border: "none", borderRadius: 6,
+                      padding: "4px 8px", fontSize: 10, cursor: "pointer", color: "#dc2626",
+                      fontFamily: "sans-serif", fontWeight: 700,
+                    }}>Del</button>
+                  )}
+                </div>
+              </div>
+            ))}
+
+            {myPayments.length === 0 && num(client.deposit) === 0 && (
+              <div style={{ padding: "12px", textAlign: "center", color: "#94a3b8", fontSize: 12, fontStyle: "italic" }}>
+                No payments recorded yet.
+              </div>
+            )}
+
+            {/* Add payment form */}
+            {!showPayForm ? (
+              <button onClick={() => setShowPayForm(true)} disabled={!onAddPayment} style={{
+                width: "100%", background: "#10b981", color: "#fff", border: "none",
+                borderRadius: 10, padding: "11px", fontSize: 13, fontWeight: 700,
+                cursor: "pointer", fontFamily: "Georgia, serif", marginTop: 4,
+              }}>+ Record New Payment</button>
+            ) : (
+              <div style={{
+                background: "#f0fdf4", border: "1.5px solid #86efac",
+                borderRadius: 10, padding: "12px", marginTop: 8,
+              }}>
+                <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 10, color: "#15803d" }}>Record New Payment</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+                  <Field label="Amount (KSh)" span={2}>
+                    <TInput type="number" value={payAmount} onChange={setPayAmount} placeholder="0" />
+                  </Field>
+                  <Field label="Date">
+                    <TInput type="date" value={payDate} onChange={setPayDate} />
+                  </Field>
+                  <Field label="Method">
+                    <TSelect value={payMethod} onChange={setPayMethod}>
+                      {PAYMENT_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
+                    </TSelect>
+                  </Field>
+                  <Field label="Note (optional)" span={2}>
+                    <TInput value={payNote} onChange={setPayNote} placeholder="e.g. M-Pesa code, etc." />
+                  </Field>
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={handleAddPayment} style={{
+                    flex: 1, background: "#10b981", color: "#fff", border: "none",
+                    borderRadius: 8, padding: "10px", fontSize: 13, fontWeight: 700,
+                    cursor: "pointer", fontFamily: "Georgia, serif",
+                  }}>Save Payment</button>
+                  <button onClick={() => { setShowPayForm(false); setPayAmount(""); setPayMethod("Cash"); setPayNote(""); }} style={{
+                    padding: "10px 14px", border: "1.5px solid #e2e8f0", borderRadius: 8,
+                    background: "#fff", color: "#64748b", fontSize: 13, cursor: "pointer",
+                    fontFamily: "Georgia, serif",
+                  }}>Cancel</button>
+                </div>
+              </div>
+            )}
           </Section>
 
           <Section title="🧱 Material Costs">
@@ -2858,7 +3075,7 @@ function FormSection({ title, color, children }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-function MonthlySummary({ monthTotals, prevTotals, selectedMonth, prevMonthKey, monthRows, monthPayments, unpaidCount, pctChange, monthCategoryTotals, setTab, periodLabel, viewMode, monthExpenses }) {
+function MonthlySummary({ monthTotals, prevTotals, selectedMonth, prevMonthKey, monthRows, monthPayments, unpaidCount, pctChange, monthCategoryTotals, setTab, periodLabel, viewMode, monthExpenses, cashReceivedThisMonth, monthClientPayments }) {
   return (
     <div>
       <div style={{
@@ -2896,6 +3113,19 @@ function MonthlySummary({ monthTotals, prevTotals, selectedMonth, prevMonthKey, 
         </div>
       </div>
 
+      {/* Cash actually received this period — separate from the sales total */}
+      <div style={{
+        background: "linear-gradient(135deg, #047857 0%, #065f46 100%)",
+        color: "#fff", borderRadius: 12, padding: "16px",
+        marginBottom: 14, boxShadow: "0 4px 12px rgba(4, 120, 87, 0.25)",
+      }}>
+        <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", opacity: 0.85, fontFamily: "sans-serif" }}>💵 Cash Received This Period</div>
+        <div style={{ fontSize: 26, fontWeight: 800, marginTop: 4, letterSpacing: -0.5 }}>{fmt(cashReceivedThisMonth)}</div>
+        <div style={{ fontSize: 11, opacity: 0.9, fontFamily: "sans-serif", marginTop: 4 }}>
+          Actual money received — includes deposits & top-up payments dated in {periodLabel}
+        </div>
+      </div>
+
       <div style={{ background: "#fff", borderRadius: 12, overflow: "hidden", marginBottom: 14, boxShadow: "0 2px 8px rgba(15,23,42,0.06)" }}>
         <div style={{ background: "#0f172a", color: "#fff", padding: "12px 16px" }}>
           <div style={{ fontSize: 13, fontWeight: 800 }}>📋 Full Month Breakdown</div>
@@ -2905,7 +3135,8 @@ function MonthlySummary({ monthTotals, prevTotals, selectedMonth, prevMonthKey, 
           <tbody>
             {[
               { section: "Income" },
-              { label: "Total Sales", value: monthTotals.sales, color: "#dc2626", strong: true },
+              { label: "Total Sales (Orders)", value: monthTotals.sales, color: "#dc2626", strong: true },
+              { label: "💵 Cash Actually Received", value: cashReceivedThisMonth, color: "#10b981", strong: true },
               { label: "Number of Clients", value: monthTotals.count, raw: true, color: "#0f172a" },
               { section: "Material Costs" },
               { label: "Materials Total", value: monthTotals.cost, color: "#ef4444", strong: true, neg: true },
@@ -3405,7 +3636,7 @@ function PendingTab({ clients, togglePaid, toggleDelivered, setViewingClient }) 
 // ── AUDIT TAB ─────────────────────────────────────────────────────────────────
 // Transparency tool: shows raw numbers and the math behind every total
 // ══════════════════════════════════════════════════════════════════════════════
-function AuditTab({ clients, monthRows, monthPayments, monthExpenses, monthTotals, payments, expenses, selectedMonth, selectedDate, viewMode, periodLabel }) {
+function AuditTab({ clients, monthRows, monthPayments, monthExpenses, monthClientPayments, cashReceivedThisMonth, monthTotals, payments, expenses, clientPayments, selectedMonth, selectedDate, viewMode, periodLabel }) {
   const [section, setSection] = useState("monthly");
   const [copied, setCopied] = useState(false);
 
@@ -3418,8 +3649,13 @@ function AuditTab({ clients, monthRows, monthPayments, monthExpenses, monthTotal
   };
 
   // Sum verify
+  const cashFromTopUps = (monthClientPayments || []).reduce((s, p) => s + num(p.amount), 0);
+  const cashFromDeposits = monthRows.reduce((s, r) => s + num(r.deposit), 0);
   const verify = {
     sales: monthRows.reduce((s, r) => s + num(r.sales), 0),
+    cashReceived: cashFromTopUps + cashFromDeposits,
+    cashFromTopUps,
+    cashFromDeposits,
     materials: monthRows.reduce((s, r) => s + (r.materialsCost ?? num(r.cost)), 0),
     tailor: monthRows.reduce((s, r) => s + num(r.tailorCost), 0),
     transport: monthRows.reduce((s, r) => s + num(r.transport), 0),
@@ -3543,6 +3779,7 @@ function AuditTab({ clients, monthRows, monthPayments, monthExpenses, monthTotal
           </div>
 
           <Row label="① Total Sales" value={verify.sales} formula={`Sum of sales from ${monthRows.length} clients`} bold />
+          <Row label="💵 Cash Received This Period" value={verify.cashReceived} formula={`Deposits dated this period (${fmt(verify.cashFromDeposits)}) + Top-up payments dated this period (${fmt(verify.cashFromTopUps)})`} bold />
           <Row label="② Materials Cost" value={verify.materials} formula="Sum of all material costs" />
           <Row label="③ Tailor Cost" value={verify.tailor} formula="Sum of tailor field" />
           <Row label="④ Transport" value={verify.transport} formula="Sum of transport field" />
