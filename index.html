@@ -1253,10 +1253,12 @@ function Dashboard({ user, onLogout }) {
     if (!cForm.client.trim() || !cForm.sales) return;
     const date = cForm.date || todayISO();
     if (cEditing) {
-      setClientsWithSync(prev => prev.map(c => c.id === cEditing ? { ...cForm, date } : c));
+      // Preserve existing enteredBy when editing — don't overwrite who originally entered
+      setClientsWithSync(prev => prev.map(c => c.id === cEditing ? { ...cForm, date, enteredBy: c.enteredBy || user.uid } : c));
       setCEditing(null);
     } else {
-      setClientsWithSync(prev => [{ ...cForm, date }, ...prev]);
+      // Tag new entries with current user's UID so we can filter them later
+      setClientsWithSync(prev => [{ ...cForm, date, enteredBy: user.uid }, ...prev]);
     }
     setCForm({ ...EMPTY_CLIENT, id: uid(), photos: [] });
     setCOpen(false);
@@ -1494,7 +1496,7 @@ function Dashboard({ user, onLogout }) {
         onDelete={() => deleteClient(viewingClient.id)}
         onReorder={() => reorderForClient(viewingClient)}
         clientPayments={clientPayments}
-        onAddPayment={(p) => setClientPaymentsWithSync(prev => [p, ...prev])}
+        onAddPayment={(p) => setClientPaymentsWithSync(prev => [{ ...p, enteredBy: user.uid }, ...prev])}
         onDeletePayment={(id) => setClientPaymentsWithSync(prev => prev.filter(x => x.id !== id))}
       />}
 
