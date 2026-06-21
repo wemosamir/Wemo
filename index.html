@@ -1632,7 +1632,7 @@ function Dashboard({ user, onLogout }) {
 
         {tab === "pending" && (
           <PendingTab
-            clients={clients}
+            clients={allClientRows}
             togglePaid={togglePaid}
             toggleDelivered={toggleDelivered}
             setViewingClient={setViewingClient}
@@ -3510,10 +3510,11 @@ function ExpensesTab({ expenses, selectedMonth, eOpen, setEOpen, eForm, setEForm
 function PendingTab({ clients, togglePaid, toggleDelivered, setViewingClient }) {
   const [section, setSection] = useState("orders"); // "orders" or "balances"
 
-  // Decorated rows with computed balance
+  // Clients are already decorated with the correct balance (sales - deposit - logged payments)
   const rows = clients.map(c => ({
     ...c,
-    balance: num(c.sales) - num(c.deposit),
+    // Ensure balance exists even if somehow not pre-computed
+    balance: c.balance != null ? c.balance : Math.max(0, num(c.sales) - num(c.deposit) - (c.ledgerPaid || 0)),
   }));
 
   // Pending orders: not delivered yet (regardless of payment)
@@ -3599,7 +3600,7 @@ function PendingTab({ clients, togglePaid, toggleDelivered, setViewingClient }) 
                   <div style={{ fontSize: 10, color: "#94a3b8", letterSpacing: 1, textTransform: "uppercase", fontFamily: "sans-serif" }}>Balance</div>
                   <div style={{ fontSize: 18, fontWeight: 800, color: r.balance > 0 ? "#ef4444" : "#10b981" }}>{fmt(r.balance)}</div>
                   <div style={{ fontSize: 11, color: "#64748b", fontFamily: "sans-serif", marginTop: 2 }}>
-                    of {fmtShort(r.sales)}
+                    {fmtShort((r.totalReceived != null ? r.totalReceived : num(r.deposit)))} of {fmtShort(r.sales)}
                   </div>
                 </div>
               </div>
