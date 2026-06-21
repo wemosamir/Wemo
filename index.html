@@ -204,13 +204,64 @@ async function fbLogin(email, password) {
 }
 
 // Sign up: create Firebase Auth account + write user profile doc
-async function fbSignup(email, password, shopName) {
+async function fbLogin(email, password) {
+  const cred = await window.fbAuth.signInWithEmailAndPassword(email.trim().toLowerCase(), password);
+  const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("profile fetch timeout")), 3000));
+  let userDoc;
+  try {
+    userDoc = await Promise.race([
+      window.fbDB.collection("users").doc(cred.user.uid).get(),
+      timeoutPromise,
+    ]);
+  } catch (e) {
+    // Auth succeeded but profile fetch failed — return minimal profile, app loads with defaults
+    return { uid: cred.user.uid, email: cred.user.email, shopName: "My Shop", role: "owner" };
+  }
+  if (userDoc.exists) {
+    const data = userDoc.data();
+    return { uid: cred.user.uid, email: cred.user.email, ...data, role: data.role || "owner" };
+  }
+  return { uid: cred.user.uid, email: cred.user.email, shopName: "My Shop", role: "owner" };
+}
+
+// Generate a random 6-char invite code
+function generateInviteCode() {
+  const chars = "ABCDEFGHIJKLMNPQRSTUVWXYZ23456789"; // omit 0/O and 1/I to avoid confusion
+  let code = "";
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
+
+// Sign up: create Firebase Auth account + write user profile doc.
+// If inviteCode is provided, this user becomes a HELPER linked to whoever owns that code.
+async function fbSignup(email, password, shopName, inviteCode) {
+  // If they entered an invite code, first verify it exists by finding the owner
+  let ownerUID = null;
+  let ownerShopName = "";
+  if (inviteCode && inviteCode.trim()) {
+    const code = inviteCode.trim().toUpperCase();
+    // Look up owner by invite code
+    const snap = await window.fbDB.collection("users").where("inviteCode", "==", code).limit(1).get();
+    if (snap.empty) {
+      throw new Error("Invalid invite code. Check with the shop owner.");
+    }
+    const ownerDoc = snap.docs[0];
+    ownerUID = ownerDoc.id;
+    ownerShopName = ownerDoc.data().shopName || "Shop";
+  }
+
   const cred = await window.fbAuth.createUserWithEmailAndPassword(email.trim().toLowerCase(), password);
   const profile = {
     email: cred.user.email,
-    shopName: shopName.trim(),
+    shopName: ownerUID ? ownerShopName + " (Helper)" : shopName.trim(),
     createdAt: new Date().toISOString(),
+    role: ownerUID ? "helper" : "owner",
+    ownerUID: ownerUID || cred.user.uid,
   };
+  // Owner generates their own invite code on signup
+  if (!ownerUID) {
+    profile.inviteCode = generateInviteCode();
+  }
   await window.fbDB.collection("users").doc(cred.user.uid).set(profile);
   return { uid: cred.user.uid, ...profile };
 }
@@ -220,15 +271,16 @@ async function fbLogout() {
   try { await window.fbAuth.signOut(); } catch (e) {}
 }
 
-// Subscribe to real-time data updates for a user. Returns an unsubscribe function.
-function subscribeUserData(uid, onData) {
-  if (!uid) return () => {};
+// Subscribe to real-time data updates. `dataUID` is whose data tree to read from
+// (for owner, it's their own UID; for helper, it's the owner's UID they're linked to).
+function subscribeUserData(dataUID, onData) {
+  if (!dataUID) return () => {};
   let clients = [], staff = [], payments = [], expenses = [], clientPayments = [];
   let ready = { c: false, s: false, p: false, e: false, cp: false };
   const tryEmit = () => {
     if (ready.c && ready.s && ready.p && ready.e && ready.cp) onData({ clients, staff, payments, expenses, clientPayments });
   };
-  const userRef = window.fbDB.collection("users").doc(uid);
+  const userRef = window.fbDB.collection("users").doc(dataUID);
   const unsubC = userRef.collection("clients").onSnapshot(
     snap => {
       clients = snap.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -528,6 +580,8 @@ function AuthScreen({ onLogin }) {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [shopName, setShopName] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
+  const [signupMode, setSignupMode] = useState("owner"); // "owner" or "helper"
   const [error, setError] = useState("");
 
   const [busy, setBusy] = useState(false);
@@ -604,13 +658,15 @@ function AuthScreen({ onLogin }) {
 
   const handleSignup = async () => {
     setError("");
-    if (!email.trim() || !password || !shopName.trim()) { setError("Please fill in all fields."); return; }
+    if (!email.trim() || !password) { setError("Please fill in email and password."); return; }
+    if (signupMode === "owner" && !shopName.trim()) { setError("Please enter a shop name."); return; }
+    if (signupMode === "helper" && !inviteCode.trim()) { setError("Please enter the invite code from your shop owner."); return; }
     if (password.length < 6) { setError("Password must be at least 6 characters."); return; }
     if (password !== confirmPassword) { setError("Passwords don't match."); return; }
     if (!window.fbAuth) { setError("Firebase not loaded — check internet & refresh."); return; }
     setBusy(true);
     try {
-      const signupPromise = fbSignup(email, password, shopName);
+      const signupPromise = fbSignup(email, password, shopName, signupMode === "helper" ? inviteCode : "");
       const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject({ code: "auth/network-request-failed" }), 15000));
       const newUser = await Promise.race([signupPromise, timeoutPromise]);
       onLogin(newUser);
@@ -707,18 +763,51 @@ function AuthScreen({ onLogin }) {
     <div style={containerStyle}>
       <div style={cardStyle}>
         <button onClick={() => { setMode("welcome"); setError(""); }} style={{ background: "none", border: "none", color: "#64748b", fontSize: 13, cursor: "pointer", fontFamily: "Georgia, serif", marginBottom: 12, padding: 0 }}>← Back</button>
-        <div style={{ marginBottom: 24 }}>
+        <div style={{ marginBottom: 18 }}>
           <div style={{ fontSize: 22, fontWeight: 800, color: "#0f172a", marginBottom: 4 }}>Create profile</div>
         </div>
-        <Field label="Shop Name"><TInput value={shopName} onChange={setShopName} placeholder="e.g. Wemo Curtains" onKeyDown={e => { if (e.key === "Enter" && !busy) handleSignup(); }} /></Field>
-        <div style={{ height: 12 }} />
+
+        {/* Owner vs Helper toggle */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 18, background: "#f1f5f9", padding: 4, borderRadius: 10 }}>
+          <button onClick={() => { setSignupMode("owner"); setError(""); }} style={{
+            flex: 1, padding: "9px 8px", border: "none", borderRadius: 7,
+            background: signupMode === "owner" ? "#dc2626" : "transparent",
+            color: signupMode === "owner" ? "#fff" : "#64748b",
+            fontWeight: 700, fontSize: 12, fontFamily: "Georgia, serif",
+            cursor: "pointer", letterSpacing: 0.3,
+          }}>👑 I'm the Owner</button>
+          <button onClick={() => { setSignupMode("helper"); setError(""); }} style={{
+            flex: 1, padding: "9px 8px", border: "none", borderRadius: 7,
+            background: signupMode === "helper" ? "#0ea5e9" : "transparent",
+            color: signupMode === "helper" ? "#fff" : "#64748b",
+            fontWeight: 700, fontSize: 12, fontFamily: "Georgia, serif",
+            cursor: "pointer", letterSpacing: 0.3,
+          }}>🤝 I'm a Helper</button>
+        </div>
+
+        {signupMode === "owner" ? (
+          <>
+            <Field label="Shop Name"><TInput value={shopName} onChange={setShopName} placeholder="e.g. Wemo Curtains" onKeyDown={e => { if (e.key === "Enter" && !busy) handleSignup(); }} /></Field>
+            <div style={{ height: 12 }} />
+          </>
+        ) : (
+          <>
+            <Field label="🔑 Invite Code from Shop Owner">
+              <TInput value={inviteCode} onChange={v => setInviteCode(v.toUpperCase())} placeholder="e.g. AB3DEF" onKeyDown={e => { if (e.key === "Enter" && !busy) handleSignup(); }} />
+            </Field>
+            <div style={{ fontSize: 11, color: "#64748b", marginTop: 4, marginBottom: 12, fontFamily: "sans-serif" }}>
+              Get this 6-character code from your shop owner's profile.
+            </div>
+          </>
+        )}
+
         <Field label="Email"><TInput type="email" value={email} onChange={setEmail} placeholder="you@example.com" onKeyDown={e => { if (e.key === "Enter" && !busy) handleSignup(); }} /></Field>
         <div style={{ height: 12 }} />
-        <Field label="Password"><TInput type="password" value={password} onChange={setPassword} placeholder="Min 4 characters" onKeyDown={e => { if (e.key === "Enter" && !busy) handleSignup(); }} /></Field>
+        <Field label="Password"><TInput type="password" value={password} onChange={setPassword} placeholder="Min 6 characters" onKeyDown={e => { if (e.key === "Enter" && !busy) handleSignup(); }} /></Field>
         <div style={{ height: 12 }} />
         <Field label="Confirm Password"><TInput type="password" value={confirmPassword} onChange={setConfirmPassword} placeholder="Repeat password" onKeyDown={e => { if (e.key === "Enter" && !busy) handleSignup(); }} /></Field>
         {error && <div style={{ marginTop: 14, padding: "10px 12px", background: "#fee2e2", border: "1px solid #fca5a5", borderRadius: 8, fontSize: 13, color: "#b91c1c", fontFamily: "sans-serif" }}>⚠️ {error}</div>}
-        <button onClick={handleSignup} disabled={busy} style={{ width: "100%", background: busy ? "#94a3b8" : "#dc2626", color: "#fff", border: "none", borderRadius: 10, padding: "13px", fontSize: 15, fontWeight: 700, cursor: busy ? "wait" : "pointer", fontFamily: "Georgia, serif", marginTop: 20 }}>{busy ? "Creating profile..." : "Create Profile"}</button>
+        <button onClick={handleSignup} disabled={busy} style={{ width: "100%", background: busy ? "#94a3b8" : (signupMode === "helper" ? "#0ea5e9" : "#dc2626"), color: "#fff", border: "none", borderRadius: 10, padding: "13px", fontSize: 15, fontWeight: 700, cursor: busy ? "wait" : "pointer", fontFamily: "Georgia, serif", marginTop: 20 }}>{busy ? "Creating profile..." : (signupMode === "helper" ? "Join as Helper" : "Create Profile")}</button>
         <div style={{ textAlign: "center", marginTop: 18, fontSize: 13, color: "#64748b", fontFamily: "sans-serif" }}>
           Already have an account?{" "}
           <button onClick={() => { setMode("login"); setError(""); }} style={{ background: "none", border: "none", color: "#dc2626", fontWeight: 700, cursor: "pointer", fontFamily: "Georgia, serif", padding: 0, fontSize: 13 }}>Login</button>
@@ -860,7 +949,14 @@ function App() {
 // ── DASHBOARD ─────────────────────────────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════════
 function Dashboard({ user, onLogout }) {
-  const [tab, setTab] = useState("summary");
+  // Role helpers:
+  //   isHelper = this user logs in as a helper (sees only their own entries)
+  //   dataUID  = whose data tree to read/write (owner's UID — for helper, this is their owner's UID)
+  const isHelper = user.role === "helper";
+  const dataUID = isHelper ? (user.ownerUID || user.uid) : user.uid;
+
+  // Default tab: helper starts on Sales (the only place they actually work).
+  const [tab, setTab] = useState(isHelper ? "sales" : "summary");
   const [clients, setClients] = useState([]);
   const [staff, setStaff] = useState([]);
   const [payments, setPayments] = useState([]);
@@ -881,10 +977,10 @@ function Dashboard({ user, onLogout }) {
     };
   }, []);
 
-  // Subscribe to Firestore for real-time updates from any device
+  // Subscribe to Firestore for real-time updates. Helper reads from owner's tree.
   useEffect(() => {
-    if (!user?.uid) return;
-    const unsub = subscribeUserData(user.uid, ({ clients, staff, payments, expenses, clientPayments }) => {
+    if (!dataUID) return;
+    const unsub = subscribeUserData(dataUID, ({ clients, staff, payments, expenses, clientPayments }) => {
       setClients(clients);
       setStaff(staff);
       setPayments(payments);
@@ -893,7 +989,32 @@ function Dashboard({ user, onLogout }) {
       setDataReady(true);
     });
     return () => unsub();
-  }, [user?.uid]);
+  }, [dataUID]);
+
+  // OWNER ONLY: if this owner doesn't have an invite code yet (existing account from before this feature),
+  // generate one and save it to their profile. Helper accounts never need this.
+  useEffect(() => {
+    if (isHelper) return;
+    if (!user.uid) return;
+    if (user.inviteCode) return; // already has one
+    (async () => {
+      try {
+        const code = generateInviteCode();
+        await window.fbDB.collection("users").doc(user.uid).set({
+          inviteCode: code,
+          role: "owner",
+          ownerUID: user.uid,
+        }, { merge: true });
+        // Update in-memory user object too so it shows immediately
+        user.inviteCode = code;
+        user.role = "owner";
+        user.ownerUID = user.uid;
+        console.log("[INVITE] Generated invite code:", code);
+      } catch (e) {
+        console.error("[INVITE] Failed to generate invite code:", e);
+      }
+    })();
+  }, [user.uid, isHelper, user.inviteCode]);
 
   // Helper: get a sync setter that writes to Firestore immediately.
   // These wrap the same useState signature used everywhere in the app,
@@ -908,13 +1029,13 @@ function Dashboard({ user, onLogout }) {
       next.forEach(c => {
         const old = prevById.get(c.id);
         if (!old || JSON.stringify(old) !== JSON.stringify(c)) {
-          fbSaveClient(user.uid, c).catch(e => console.error("[SAVE] Save client failed:", e.code, e.message));
+          fbSaveClient(dataUID, c).catch(e => console.error("[SAVE] Save client failed:", e.code, e.message));
         }
       });
       // Deletions
       prev.forEach(c => {
         if (!nextById.has(c.id)) {
-          fbDeleteClient(user.uid, c.id).catch(e => console.error("Delete client failed", e));
+          fbDeleteClient(dataUID, c.id).catch(e => console.error("Delete client failed", e));
         }
       });
       return next;
@@ -928,12 +1049,12 @@ function Dashboard({ user, onLogout }) {
       next.forEach(s => {
         const old = prevById.get(s.id);
         if (!old || JSON.stringify(old) !== JSON.stringify(s)) {
-          fbSaveStaff(user.uid, s).catch(e => console.error("Save staff failed", e));
+          fbSaveStaff(dataUID, s).catch(e => console.error("Save staff failed", e));
         }
       });
       prev.forEach(s => {
         if (!nextById.has(s.id)) {
-          fbDeleteStaff(user.uid, s.id).catch(e => console.error("Delete staff failed", e));
+          fbDeleteStaff(dataUID, s.id).catch(e => console.error("Delete staff failed", e));
         }
       });
       return next;
@@ -947,12 +1068,12 @@ function Dashboard({ user, onLogout }) {
       next.forEach(p => {
         const old = prevById.get(p.id);
         if (!old || JSON.stringify(old) !== JSON.stringify(p)) {
-          fbSavePayment(user.uid, p).catch(e => console.error("Save payment failed", e));
+          fbSavePayment(dataUID, p).catch(e => console.error("Save payment failed", e));
         }
       });
       prev.forEach(p => {
         if (!nextById.has(p.id)) {
-          fbDeletePayment(user.uid, p.id).catch(e => console.error("Delete payment failed", e));
+          fbDeletePayment(dataUID, p.id).catch(e => console.error("Delete payment failed", e));
         }
       });
       return next;
@@ -966,12 +1087,12 @@ function Dashboard({ user, onLogout }) {
       next.forEach(e => {
         const old = prevById.get(e.id);
         if (!old || JSON.stringify(old) !== JSON.stringify(e)) {
-          fbSaveExpense(user.uid, e).catch(err => console.error("Save expense failed", err));
+          fbSaveExpense(dataUID, e).catch(err => console.error("Save expense failed", err));
         }
       });
       prev.forEach(e => {
         if (!nextById.has(e.id)) {
-          fbDeleteExpense(user.uid, e.id).catch(err => console.error("Delete expense failed", err));
+          fbDeleteExpense(dataUID, e.id).catch(err => console.error("Delete expense failed", err));
         }
       });
       return next;
@@ -985,12 +1106,12 @@ function Dashboard({ user, onLogout }) {
       next.forEach(p => {
         const old = prevById.get(p.id);
         if (!old || JSON.stringify(old) !== JSON.stringify(p)) {
-          fbSaveClientPayment(user.uid, p).catch(err => console.error("Save client payment failed", err));
+          fbSaveClientPayment(dataUID, p).catch(err => console.error("Save client payment failed", err));
         }
       });
       prev.forEach(p => {
         if (!nextById.has(p.id)) {
-          fbDeleteClientPayment(user.uid, p.id).catch(err => console.error("Delete client payment failed", err));
+          fbDeleteClientPayment(dataUID, p.id).catch(err => console.error("Delete client payment failed", err));
         }
       });
       return next;
@@ -1035,18 +1156,29 @@ function Dashboard({ user, onLogout }) {
     return itemized > 0 ? itemized : num(c.cost);
   };
 
+  // For helpers: filter clients and clientPayments to only their own entries.
+  // Owners see everything.
+  const visibleClients = useMemo(() => {
+    if (isHelper) return clients.filter(c => c.enteredBy === user.uid);
+    return clients;
+  }, [clients, isHelper, user.uid]);
+  const visibleClientPayments = useMemo(() => {
+    if (isHelper) return clientPayments.filter(p => p.enteredBy === user.uid);
+    return clientPayments;
+  }, [clientPayments, isHelper, user.uid]);
+
   // Build a map: clientId -> total of all payments logged for that client
   const paymentTotalByClient = useMemo(() => {
     const map = new Map();
-    clientPayments.forEach(p => {
+    visibleClientPayments.forEach(p => {
       const cid = p.clientId;
       if (!cid) return;
       map.set(cid, (map.get(cid) || 0) + num(p.amount));
     });
     return map;
-  }, [clientPayments]);
+  }, [visibleClientPayments]);
 
-  const allClientRows = clients.map(c => {
+  const allClientRows = visibleClients.map(c => {
     const ledgerPaid = paymentTotalByClient.get(c.id) || 0;
     const totalReceived = num(c.deposit) + ledgerPaid;
     return {
@@ -1420,15 +1552,15 @@ function Dashboard({ user, onLogout }) {
         </div>
         <div style={{ display: "flex", gap: 4, paddingBottom: 10, overflowX: "auto" }}>
           {[
-            { key: "summary", label: "📅 Monthly" },
+            { key: "summary", label: "📅 Monthly", ownerOnly: true },
             { key: "sales", label: "💼 Sales" },
             { key: "pending", label: "⏳ Pending" },
             { key: "clients", label: "👤 Clients" },
-            { key: "categories", label: "📊 Categories" },
-            { key: "staff", label: "👥 Staff" },
-            { key: "expenses", label: "💸 Expenses" },
-            { key: "audit", label: "🔎 Audit" },
-          ].map(t => (
+            { key: "categories", label: "📊 Categories", ownerOnly: true },
+            { key: "staff", label: "👥 Staff", ownerOnly: true },
+            { key: "expenses", label: "💸 Expenses", ownerOnly: true },
+            { key: "audit", label: "🔎 Audit", ownerOnly: true },
+          ].filter(t => !t.ownerOnly || !isHelper).map(t => (
             <button key={t.key} onClick={() => setTab(t.key)} style={{
               padding: "7px 14px", borderRadius: 20, border: "none", whiteSpace: "nowrap",
               background: tab === t.key ? "#dc2626" : "rgba(255,255,255,0.08)",
@@ -1472,8 +1604,42 @@ function Dashboard({ user, onLogout }) {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 16, fontWeight: 800, color: "#0f172a", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{user.shopName}</div>
                 <div style={{ fontSize: 12, color: "#64748b", fontFamily: "sans-serif", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{user.email}</div>
+                <div style={{ fontSize: 11, color: isHelper ? "#0ea5e9" : "#dc2626", fontFamily: "sans-serif", fontWeight: 700, marginTop: 2 }}>
+                  {isHelper ? "🤝 Helper Account" : "👑 Owner Account"}
+                </div>
               </div>
             </div>
+
+            {/* Owner: show invite code */}
+            {!isHelper && user.inviteCode && (
+              <div style={{
+                background: "#fef2f2", border: "1.5px solid #fca5a5",
+                borderRadius: 10, padding: "12px 14px", marginBottom: 14,
+              }}>
+                <div style={{ fontSize: 10, letterSpacing: 1.5, textTransform: "uppercase", color: "#991b1b", fontFamily: "sans-serif", fontWeight: 700, marginBottom: 4 }}>
+                  🔑 Helper Invite Code
+                </div>
+                <div style={{
+                  fontSize: 26, fontWeight: 800, color: "#dc2626", fontFamily: "monospace",
+                  letterSpacing: 3, textAlign: "center", padding: "8px 0",
+                }}>{user.inviteCode}</div>
+                <div style={{ fontSize: 11, color: "#7f1d1d", fontFamily: "sans-serif", lineHeight: 1.5, marginTop: 4 }}>
+                  Share this code with your helper. They enter it when creating their account to link to your shop. They'll only see clients they enter themselves.
+                </div>
+              </div>
+            )}
+
+            {/* Helper: show who they're linked to */}
+            {isHelper && (
+              <div style={{
+                background: "#eff6ff", border: "1.5px solid #93c5fd",
+                borderRadius: 10, padding: "12px 14px", marginBottom: 14,
+              }}>
+                <div style={{ fontSize: 11, color: "#1e40af", fontFamily: "sans-serif", lineHeight: 1.5 }}>
+                  🤝 You're a helper. You can add new clients and record their payments. You only see clients you've entered yourself.
+                </div>
+              </div>
+            )}
             <button onClick={() => { setProfileOpen(false); handleLogout(); }} style={{
               width: "100%", background: "#ef4444", color: "#fff",
               border: "none", borderRadius: 10, padding: "12px",
@@ -1495,7 +1661,7 @@ function Dashboard({ user, onLogout }) {
         onEdit={() => editClient(viewingClient)}
         onDelete={() => deleteClient(viewingClient.id)}
         onReorder={() => reorderForClient(viewingClient)}
-        clientPayments={clientPayments}
+        clientPayments={visibleClientPayments}
         onAddPayment={(p) => setClientPaymentsWithSync(prev => [{ ...p, enteredBy: user.uid }, ...prev])}
         onDeletePayment={(id) => setClientPaymentsWithSync(prev => prev.filter(x => x.id !== id))}
       />}
@@ -1571,7 +1737,7 @@ function Dashboard({ user, onLogout }) {
           </div>
         )}
 
-        {tab === "summary" && (
+        {tab === "summary" && !isHelper && (
           <MonthlySummary
             monthTotals={monthTotals} prevTotals={prevTotals}
             selectedMonth={selectedMonth} prevMonthKey={prevMonthKey}
@@ -1613,11 +1779,11 @@ function Dashboard({ user, onLogout }) {
           />
         )}
 
-        {tab === "categories" && (
+        {tab === "categories" && !isHelper && (
           <CategoriesTab monthRows={monthRows} selectedMonth={selectedMonth} monthCategoryTotals={monthCategoryTotals} monthTotals={monthTotals} />
         )}
 
-        {tab === "staff" && (
+        {tab === "staff" && !isHelper && (
           <StaffTab
             staffMonthBreakdown={staffMonthBreakdown}
             salespersonStats={salespersonStats}
@@ -1642,7 +1808,7 @@ function Dashboard({ user, onLogout }) {
           />
         )}
 
-        {tab === "expenses" && (
+        {tab === "expenses" && !isHelper && (
           <ExpensesTab
             expenses={expenses}
             selectedMonth={selectedMonth}
@@ -1657,7 +1823,7 @@ function Dashboard({ user, onLogout }) {
           />
         )}
 
-        {tab === "audit" && (
+        {tab === "audit" && !isHelper && (
           <AuditTab
             clients={allClientRows}
             monthRows={monthRows}
@@ -1668,7 +1834,7 @@ function Dashboard({ user, onLogout }) {
             monthTotals={monthTotals}
             payments={payments}
             expenses={expenses}
-            clientPayments={clientPayments}
+            clientPayments={visibleClientPayments}
             selectedMonth={selectedMonth}
             selectedDate={selectedDate}
             viewMode={viewMode}
