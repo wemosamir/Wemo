@@ -989,21 +989,45 @@ function Dashboard({ user, onLogout }) {
     return () => unsub();
   }, [dataUID]);
 
-  // OWNER ONLY: if this owner doesn't have an invite code yet (existing account from before this feature),
-  // generate one and save it to their profile. Helper accounts never need this.
+  // OWNER-ONLY: ensure existing owner accounts (created before this feature) have an invite code.
+  // SAFETY: This must NEVER touch a helper account. A helper's profile has role="helper" and
+  // an ownerUID pointing to their owner. If ANY of these are present, we never write here.
   useEffect(() => {
+    // Defensive: bail out if anything looks helper-shaped at all
     if (isHelper) return;
+    if (user.role === "helper") return; // belt + suspenders
+    if (user.ownerUID && user.ownerUID !== user.uid) return; // already linked to someone else
+    if (user.inviteCode) return; // already has a code
     if (!user.uid) return;
-    if (user.inviteCode) return; // already has one
+
+    // Re-read profile directly from Firestore to be SURE we don't overwrite helper data.
+    // Only generate code if profile genuinely lacks both role and inviteCode.
     (async () => {
       try {
+        const doc = await window.fbDB.collection("users").doc(user.uid).get();
+        if (doc.exists) {
+          const data = doc.data();
+          // If this user is a helper (anywhere in their data), STOP IMMEDIATELY
+          if (data.role === "helper") {
+            console.log("[INVITE] Skipping: this is a helper account");
+            return;
+          }
+          if (data.ownerUID && data.ownerUID !== user.uid) {
+            console.log("[INVITE] Skipping: account is linked to another owner");
+            return;
+          }
+          if (data.inviteCode) {
+            console.log("[INVITE] Already has code, no-op");
+            return;
+          }
+        }
+        // Safe to generate
         const code = generateInviteCode();
         await window.fbDB.collection("users").doc(user.uid).set({
           inviteCode: code,
           role: "owner",
           ownerUID: user.uid,
         }, { merge: true });
-        // Update in-memory user object too so it shows immediately
         user.inviteCode = code;
         user.role = "owner";
         user.ownerUID = user.uid;
@@ -1012,7 +1036,7 @@ function Dashboard({ user, onLogout }) {
         console.error("[INVITE] Failed to generate invite code:", e);
       }
     })();
-  }, [user.uid, isHelper, user.inviteCode]);
+  }, [user.uid, isHelper, user.inviteCode, user.role, user.ownerUID]);
 
   // Helper: get a sync setter that writes to Firestore immediately.
   // These wrap the same useState signature used everywhere in the app,
